@@ -18,7 +18,6 @@
 package kafka.server
 
 import java.util.Optional
-
 import kafka.utils.TestUtils
 import org.apache.kafka.common.Uuid
 import org.apache.kafka.common.errors.UnsupportedVersionException
@@ -63,7 +62,7 @@ class MetadataRequestTest extends AbstractMetadataRequestTest {
    */
   @ParameterizedTest
   @ValueSource(strings = Array("zk"))
-  def testControllerId(): Unit = {
+  def testControllerId(quorum: String): Unit = {
     val controllerServer = servers.find(_.kafkaController.isActive).get
     val controllerId = controllerServer.config.brokerId
     val metadataResponse = sendMetadataRequest(MetadataRequest.Builder.allTopics.build(1.toShort))
@@ -150,7 +149,7 @@ class MetadataRequestTest extends AbstractMetadataRequestTest {
     checkAutoCreatedTopic(topic3, response2)
 
     // V3 doesn't support a configurable allowAutoTopicCreation, so disabling auto-creation is not supported
-    assertThrows(classOf[UnsupportedVersionException], () => sendMetadataRequest(new MetadataRequest(requestData(List(topic4), false), 3.toShort)))
+    assertThrows(classOf[UnsupportedVersionException], () => sendMetadataRequest(new MetadataRequest(requestData(List(topic4), allowAutoTopicCreation = false), 3.toShort)))
 
     // V4 and higher support a configurable allowAutoTopicCreation
     val response3 = sendMetadataRequest(new MetadataRequest.Builder(Seq(topic4, topic5).asJava, false, 4.toShort).build)
@@ -220,7 +219,7 @@ class MetadataRequestTest extends AbstractMetadataRequestTest {
     createTopic("t2", 3, 2)
 
     // v0, Empty list represents all topics
-    val metadataResponseV0 = sendMetadataRequest(new MetadataRequest(requestData(List(), true), 0.toShort))
+    val metadataResponseV0 = sendMetadataRequest(new MetadataRequest(requestData(List(), allowAutoTopicCreation = true), 0.toShort))
     assertTrue(metadataResponseV0.errors.isEmpty, "V0 Response should have no errors")
     assertEquals(2, metadataResponseV0.topicMetadata.size(), "V0 Response should have 2 (all) topics")
 
@@ -236,8 +235,8 @@ class MetadataRequestTest extends AbstractMetadataRequestTest {
     val replicaAssignment = Map(0 -> Seq(1, 2, 0), 1 -> Seq(2, 0, 1))
     val topic1 = "topic1"
     val topic2 = "topic2"
-    createTopic(topic1, replicaAssignment)
-    createTopic(topic2, replicaAssignment)
+    createTopicWithAssignment(topic1, replicaAssignment)
+    createTopicWithAssignment(topic2, replicaAssignment)
 
     // if version < 9, return ZERO_UUID in MetadataResponse
     val resp1 = sendMetadataRequest(new MetadataRequest.Builder(Seq(topic1, topic2).asJava, true, 0, 9).build(), Some(anySocketServer))
@@ -264,7 +263,7 @@ class MetadataRequestTest extends AbstractMetadataRequestTest {
   @ValueSource(strings = Array("zk", "kraft"))
   def testPreferredReplica(quorum: String): Unit = {
     val replicaAssignment = Map(0 -> Seq(1, 2, 0), 1 -> Seq(2, 0, 1))
-    createTopic("t1", replicaAssignment)
+    createTopicWithAssignment("t1", replicaAssignment)
     // Test metadata on two different brokers to ensure that metadata propagation works correctly
     val responses = Seq(0, 1).map(index =>
       sendMetadataRequest(new MetadataRequest.Builder(Seq("t1").asJava, true).build(),
@@ -310,7 +309,7 @@ class MetadataRequestTest extends AbstractMetadataRequestTest {
     }, "Replica was not found down", 50000)
 
     // Validate version 0 still filters unavailable replicas and contains error
-    val v0MetadataResponse = sendMetadataRequest(new MetadataRequest(requestData(List(replicaDownTopic), true), 0.toShort))
+    val v0MetadataResponse = sendMetadataRequest(new MetadataRequest(requestData(List(replicaDownTopic), allowAutoTopicCreation = true), 0.toShort))
     val v0BrokerIds = v0MetadataResponse.brokers().asScala.map(_.id).toSeq
     assertTrue(v0MetadataResponse.errors.isEmpty, "Response should have no errors")
     assertFalse(v0BrokerIds.contains(downNode.config.brokerId), s"The downed broker should not be in the brokers list")

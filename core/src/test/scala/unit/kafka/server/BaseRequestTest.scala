@@ -19,7 +19,6 @@ package kafka.server
 
 import kafka.api.IntegrationTestHarness
 import kafka.network.SocketServer
-import kafka.utils.NotNothing
 import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.requests.{AbstractRequest, AbstractResponse, RequestHeader, ResponseHeader}
@@ -30,7 +29,6 @@ import java.io.{DataInputStream, DataOutputStream}
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.Properties
-import scala.annotation.nowarn
 import scala.collection.Seq
 import scala.reflect.ClassTag
 
@@ -83,6 +81,20 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
     }.map(_.socketServer).getOrElse(throw new IllegalStateException(s"Could not find broker with id $brokerId"))
   }
 
+  /**
+   * Return the socket server where admin request to be sent.
+   *
+   * For KRaft clusters that is any broker as the broker will forward the request to the active
+   * controller. For Legacy clusters that is the controller broker.
+   */
+  def adminSocketServer: SocketServer = {
+    if (isKRaftTest()) {
+      anySocketServer
+    } else {
+      controllerSocketServer
+    }
+  }
+
   def connect(socketServer: SocketServer = anySocketServer,
               listenerName: ListenerName = listenerName): Socket = {
     new Socket("localhost", socketServer.boundPort(listenerName))
@@ -96,7 +108,7 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
   }
 
   def receive[T <: AbstractResponse](socket: Socket, apiKey: ApiKeys, version: Short)
-                                    (implicit classTag: ClassTag[T], @nowarn("cat=unused") nn: NotNothing[T]): T = {
+                                    (implicit classTag: ClassTag[T]): T = {
     val incoming = new DataInputStream(socket.getInputStream)
     val len = incoming.readInt()
 
@@ -117,7 +129,7 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
                                             socket: Socket,
                                             clientId: String = "client-id",
                                             correlationId: Option[Int] = None)
-                                           (implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
+                                           (implicit classTag: ClassTag[T]): T = {
     send(request, socket, clientId, correlationId)
     receive[T](socket, request.apiKey, request.version)
   }
@@ -125,7 +137,7 @@ abstract class BaseRequestTest extends IntegrationTestHarness {
   def connectAndReceive[T <: AbstractResponse](request: AbstractRequest,
                                                destination: SocketServer = anySocketServer,
                                                listenerName: ListenerName = listenerName)
-                                              (implicit classTag: ClassTag[T], nn: NotNothing[T]): T = {
+                                              (implicit classTag: ClassTag[T]): T = {
     val socket = connect(destination, listenerName)
     try sendAndReceive[T](request, socket)
     finally socket.close()

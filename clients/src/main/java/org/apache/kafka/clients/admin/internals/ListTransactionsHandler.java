@@ -35,7 +35,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-public class ListTransactionsHandler implements AdminApiHandler<AllBrokersStrategy.BrokerKey, Collection<TransactionListing>> {
+public class ListTransactionsHandler extends AdminApiHandler.Batched<AllBrokersStrategy.BrokerKey, Collection<TransactionListing>> {
     private final Logger log;
     private final ListTransactionsOptions options;
     private final AllBrokersStrategy lookupStrategy;
@@ -64,7 +64,7 @@ public class ListTransactionsHandler implements AdminApiHandler<AllBrokersStrate
     }
 
     @Override
-    public ListTransactionsRequest.Builder buildRequest(
+    public ListTransactionsRequest.Builder buildBatchedRequest(
         int brokerId,
         Set<AllBrokersStrategy.BrokerKey> keys
     ) {
@@ -73,6 +73,7 @@ public class ListTransactionsHandler implements AdminApiHandler<AllBrokersStrate
         request.setStateFilters(options.filteredStates().stream()
             .map(TransactionState::toString)
             .collect(Collectors.toList()));
+        request.setDurationFilter(options.filteredDuration());
         return new ListTransactionsRequest.Builder(request);
     }
 

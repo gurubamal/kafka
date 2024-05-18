@@ -17,9 +17,8 @@
 
 package kafka.server
 
-import java.util.{Arrays, LinkedHashMap, Optional, Properties}
-
-import kafka.api.KAFKA_2_7_IV0
+import java.util
+import java.util.{Optional, Properties}
 import kafka.network.SocketServer
 import kafka.utils.TestUtils
 import org.apache.kafka.common.{TopicIdPartition, TopicPartition, Uuid}
@@ -27,6 +26,9 @@ import org.apache.kafka.common.message.DeleteTopicsRequestData
 import org.apache.kafka.common.message.DeleteTopicsRequestData.DeleteTopicState
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.requests.{DeleteTopicsRequest, DeleteTopicsResponse, FetchRequest, FetchResponse, MetadataRequest, MetadataResponse}
+import org.apache.kafka.coordinator.group.GroupCoordinatorConfig
+import org.apache.kafka.server.common.MetadataVersion.IBP_2_7_IV0
+import org.apache.kafka.server.config.ReplicationConfigs
 import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.api.{BeforeEach, Test, TestInfo}
 
@@ -36,9 +38,9 @@ import scala.jdk.CollectionConverters._
 class TopicIdWithOldInterBrokerProtocolTest extends BaseRequestTest {
 
   override def brokerPropertyOverrides(properties: Properties): Unit = {
-    properties.setProperty(KafkaConfig.InterBrokerProtocolVersionProp, KAFKA_2_7_IV0.toString)
-    properties.setProperty(KafkaConfig.OffsetsTopicPartitionsProp, "1")
-    properties.setProperty(KafkaConfig.DefaultReplicationFactorProp, "2")
+    properties.setProperty(ReplicationConfigs.INTER_BROKER_PROTOCOL_VERSION_CONFIG, IBP_2_7_IV0.toString)
+    properties.setProperty(GroupCoordinatorConfig.OFFSETS_TOPIC_PARTITIONS_CONFIG, "1")
+    properties.setProperty(ReplicationConfigs.DEFAULT_REPLICATION_FACTOR_CONFIG, "2")
     properties.setProperty(KafkaConfig.RackProp, s"rack/${properties.getProperty(KafkaConfig.BrokerIdProp)}")
   }
 
@@ -51,7 +53,7 @@ class TopicIdWithOldInterBrokerProtocolTest extends BaseRequestTest {
   def testMetadataTopicIdsWithOldIBP(): Unit = {
     val replicaAssignment = Map(0 -> Seq(1, 2, 0), 1 -> Seq(2, 0, 1))
     val topic1 = "topic1"
-    createTopic(topic1, replicaAssignment)
+    createTopicWithAssignment(topic1, replicaAssignment)
 
     val resp = sendMetadataRequest(new MetadataRequest.Builder(Seq(topic1, topic1).asJava, true, 10, 10).build(), Some(notControllerSocketServer))
     assertEquals(1, resp.topicMetadata.size)
@@ -73,7 +75,7 @@ class TopicIdWithOldInterBrokerProtocolTest extends BaseRequestTest {
     val topicNames = topicIds.map(_.swap)
     val tidp0 = new TopicIdPartition(topicIds(topic1), tp0)
 
-    val leadersMap = createTopic(topic1, replicaAssignment)
+    val leadersMap = createTopicWithAssignment(topic1, replicaAssignment)
     val req = createFetchRequest(maxResponseBytes, maxPartitionBytes, Seq(tidp0), Map.empty, ApiKeys.FETCH.latestVersion())
     val resp = sendFetchRequest(leadersMap(0), req)
 
@@ -94,14 +96,14 @@ class TopicIdWithOldInterBrokerProtocolTest extends BaseRequestTest {
     val topicNames = topicIds.map(_.swap)
     val tidp0 = new TopicIdPartition(topicIds(topic1), tp0)
 
-    val leadersMap = createTopic(topic1, replicaAssignment)
+    val leadersMap = createTopicWithAssignment(topic1, replicaAssignment)
     val req = createFetchRequest(maxResponseBytes, maxPartitionBytes, Seq(tidp0), Map.empty, 12)
     val resp = sendFetchRequest(leadersMap(0), req)
 
     assertEquals(Errors.NONE, resp.error())
 
     val responseData = resp.responseData(topicNames.asJava, 12)
-    assertEquals(Errors.NONE.code, responseData.get(tp0).errorCode);
+    assertEquals(Errors.NONE.code, responseData.get(tp0).errorCode)
   }
 
   @Test
@@ -111,7 +113,7 @@ class TopicIdWithOldInterBrokerProtocolTest extends BaseRequestTest {
     createTopic("topic-4", 1, 2)
     val request = new DeleteTopicsRequest.Builder(
       new DeleteTopicsRequestData()
-        .setTopicNames(Arrays.asList("topic-3", "topic-4"))
+        .setTopicNames(util.Arrays.asList("topic-3", "topic-4"))
         .setTimeoutMs(timeout)).build()
     val resp = sendDeleteTopicsRequest(request)
     val error = resp.errorCounts.asScala.find(_._1 != Errors.NONE)
@@ -132,7 +134,7 @@ class TopicIdWithOldInterBrokerProtocolTest extends BaseRequestTest {
     val ids = Map("topic-7" -> Uuid.randomUuid(), "topic-6" -> Uuid.randomUuid())
     val request = new DeleteTopicsRequest.Builder(
       new DeleteTopicsRequestData()
-        .setTopics(Arrays.asList(new DeleteTopicState().setTopicId(ids("topic-7")),
+        .setTopics(util.Arrays.asList(new DeleteTopicState().setTopicId(ids("topic-7")),
           new DeleteTopicState().setTopicId(ids("topic-6"))
         )).setTimeoutMs(timeout)).build()
     val response = sendDeleteTopicsRequest(request)
@@ -152,8 +154,8 @@ class TopicIdWithOldInterBrokerProtocolTest extends BaseRequestTest {
   }
 
   private def createPartitionMap(maxPartitionBytes: Int, topicPartitions: Seq[TopicIdPartition],
-                                 offsetMap: Map[TopicPartition, Long]): LinkedHashMap[TopicPartition, FetchRequest.PartitionData] = {
-    val partitionMap = new LinkedHashMap[TopicPartition, FetchRequest.PartitionData]
+                                 offsetMap: Map[TopicPartition, Long]): util.LinkedHashMap[TopicPartition, FetchRequest.PartitionData] = {
+    val partitionMap = new util.LinkedHashMap[TopicPartition, FetchRequest.PartitionData]
     topicPartitions.foreach { tp =>
       partitionMap.put(tp.topicPartition, new FetchRequest.PartitionData(tp.topicId, offsetMap.getOrElse(tp.topicPartition, 0), 0L, maxPartitionBytes,
         Optional.empty()))
@@ -172,7 +174,7 @@ class TopicIdWithOldInterBrokerProtocolTest extends BaseRequestTest {
   private def validateTopicIsDeleted(topic: String): Unit = {
     val metadata = connectAndReceive[MetadataResponse](new MetadataRequest.Builder(
       List(topic).asJava, true).build).topicMetadata.asScala
-    TestUtils.waitUntilTrue (() => !metadata.exists(p => p.topic.equals(topic) && p.error == Errors.NONE),
+    TestUtils.waitUntilTrue(() => !metadata.exists(p => p.topic.equals(topic) && p.error == Errors.NONE),
       s"The topic $topic should not exist")
   }
 

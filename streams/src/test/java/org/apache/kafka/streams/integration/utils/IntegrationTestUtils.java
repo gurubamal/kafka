@@ -16,7 +16,6 @@
  */
 package org.apache.kafka.streams.integration.utils;
 
-import kafka.api.Request;
 import kafka.server.KafkaServer;
 import kafka.server.MetadataCache;
 import org.apache.kafka.clients.admin.Admin;
@@ -32,9 +31,11 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.message.UpdateMetadataRequestData.UpdateMetadataPartitionState;
+import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.KafkaStreams;
@@ -46,7 +47,9 @@ import org.apache.kafka.streams.StoreQueryParameters;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.InvalidStateStoreException;
+import org.apache.kafka.streams.processor.StandbyUpdateListener;
 import org.apache.kafka.streams.processor.StateRestoreListener;
+import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.internals.StreamThread;
 import org.apache.kafka.streams.processor.internals.ThreadStateTransitionValidator;
 import org.apache.kafka.streams.processor.internals.assignment.AssignorConfiguration.AssignmentListener;
@@ -58,6 +61,7 @@ import org.apache.kafka.streams.query.StateQueryResult;
 import org.apache.kafka.streams.state.QueryableStoreType;
 import org.apache.kafka.test.TestCondition;
 import org.apache.kafka.test.TestUtils;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.rules.TestName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,11 +70,11 @@ import scala.Option;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -101,6 +105,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.fail;
+import static java.util.Collections.singletonList;
 
 /**
  * Utility functions to make integration testing more convenient.
@@ -225,14 +230,37 @@ public class IntegrationTestUtils {
     /**
      * Gives a test name that is safe to be used in application ids, topic names, etc.
      * The name is safe even for parameterized methods.
+     * Used by tests not yet migrated from JUnit 4.
      */
-    public static String safeUniqueTestName(final Class<?> testClass, final TestName testName) {
-        return (testClass.getSimpleName() + testName.getMethodName())
-                .replace('.', '_')
-                .replace('[', '_')
-                .replace(']', '_')
-                .replace(' ', '_')
-                .replace('=', '_');
+    public static String safeUniqueTestName(final TestName testName) {
+        final String methodName = testName.getMethodName();
+        return safeUniqueTestName(methodName);
+    }
+
+    /**
+     * Same as @see IntegrationTestUtils#safeUniqueTestName except it accepts a TestInfo passed in by
+     * JUnit 5 instead of a TestName from JUnit 4.
+     * Used by tests migrated to JUnit 5.
+     */
+    public static String safeUniqueTestName(final TestInfo testInfo) {
+        final String methodName = testInfo.getTestMethod().map(Method::getName).orElse("unknownMethodName");
+        return safeUniqueTestName(methodName);
+    }
+
+    private static String safeUniqueTestName(final String testName) {
+        return sanitize(testName + Uuid.randomUuid().toString());
+    }
+
+    private static String sanitize(final String str) {
+        return str
+            // The `-` is used in Streams' thread name as a separator and some tests rely on this.
+            .replace('-', '_')
+            .replace(':', '_')
+            .replace('.', '_')
+            .replace('[', '_')
+            .replace(']', '_')
+            .replace(' ', '_')
+            .replace('=', '_');
     }
 
     /**
@@ -271,10 +299,17 @@ public class IntegrationTestUtils {
     public static void cleanStateBeforeTest(final EmbeddedKafkaCluster cluster,
                                             final int partitionCount,
                                             final String... topics) {
+        cleanStateBeforeTest(cluster, partitionCount, 1, topics);
+    }
+
+    public static void cleanStateBeforeTest(final EmbeddedKafkaCluster cluster,
+                                            final int partitionCount,
+                                            final int replicationCount,
+                                            final String... topics) {
         try {
             cluster.deleteAllTopicsAndWait(DEFAULT_TIMEOUT);
             for (final String topic : topics) {
-                cluster.createTopic(topic, partitionCount, 1);
+                cluster.createTopic(topic, partitionCount, replicationCount);
             }
         } catch (final InterruptedException e) {
             throw new RuntimeException(e);
@@ -748,6 +783,7 @@ public class IntegrationTestUtils {
 
     /**
      * Wait until final key-value mappings have been consumed.
+     * Duplicate records are not considered in the comparison.
      *
      * @param consumerConfig     Kafka Consumer configuration
      * @param topic              Kafka topic to consume from
@@ -764,6 +800,7 @@ public class IntegrationTestUtils {
 
     /**
      * Wait until final key-value mappings have been consumed.
+     * Duplicate records are not considered in the comparison.
      *
      * @param consumerConfig     Kafka Consumer configuration
      * @param topic              Kafka topic to consume from
@@ -780,6 +817,7 @@ public class IntegrationTestUtils {
 
     /**
      * Wait until final key-value mappings have been consumed.
+     * Duplicate records are not considered in the comparison.
      *
      * @param consumerConfig     Kafka Consumer configuration
      * @param topic              Kafka topic to consume from
@@ -823,15 +861,19 @@ public class IntegrationTestUtils {
                 // still need to check that for each key, the ordering is expected
                 final Map<K, List<T>> finalAccumData = new HashMap<>();
                 for (final T kv : accumulatedActual) {
-                    finalAccumData.computeIfAbsent(
-                        withTimestamp ? ((KeyValueTimestamp<K, V>) kv).key() : ((KeyValue<K, V>) kv).key,
-                        key -> new ArrayList<>()).add(kv);
+                    final K key = withTimestamp ? ((KeyValueTimestamp<K, V>) kv).key() : ((KeyValue<K, V>) kv).key;
+                    final List<T> records = finalAccumData.computeIfAbsent(key, k -> new ArrayList<>());
+                    if (!records.contains(kv)) {
+                        records.add(kv);
+                    }
                 }
                 final Map<K, List<T>> finalExpected = new HashMap<>();
                 for (final T kv : expectedRecords) {
-                    finalExpected.computeIfAbsent(
-                        withTimestamp ? ((KeyValueTimestamp<K, V>) kv).key() : ((KeyValue<K, V>) kv).key,
-                        key -> new ArrayList<>()).add(kv);
+                    final K key = withTimestamp ? ((KeyValueTimestamp<K, V>) kv).key() : ((KeyValue<K, V>) kv).key;
+                    final List<T> records = finalExpected.computeIfAbsent(key, k -> new ArrayList<>());
+                    if (!records.contains(kv)) {
+                        records.add(kv);
+                    }
                 }
 
                 // returns true only if the remaining records in both lists are the same and in the same order
@@ -929,7 +971,7 @@ public class IntegrationTestUtils {
                 }
 
                 final UpdateMetadataPartitionState metadataPartitionState = partitionInfo.get();
-                if (!Request.isValidBrokerId(metadataPartitionState.leader())) {
+                if (!FetchRequest.isValidBrokerId(metadataPartitionState.leader())) {
                     invalidBrokerIds.add(server);
                 }
             }
@@ -938,6 +980,14 @@ public class IntegrationTestUtils {
                 ". Brokers with invalid broker id for partition leader: " + invalidBrokerIds;
             assertThat(reason, emptyPartitionInfos.isEmpty() && invalidBrokerIds.isEmpty());
         });
+    }
+
+    public static void startApplicationAndWaitUntilRunning(final KafkaStreams streams) throws Exception {
+        startApplicationAndWaitUntilRunning(singletonList(streams));
+    }
+
+    public static void startApplicationAndWaitUntilRunning(final List<KafkaStreams> streamsList) throws Exception {
+        startApplicationAndWaitUntilRunning(streamsList, Duration.ofSeconds(DEFAULT_TIMEOUT));
     }
 
     /**
@@ -1002,8 +1052,8 @@ public class IntegrationTestUtils {
                 final long millisRemaining = expectedEnd - System.currentTimeMillis();
                 if (millisRemaining <= 0) {
                     fail(
-                        "Application did not reach a RUNNING state for all streams instances. " +
-                            "Non-running instances: " + nonRunningStreams
+                        nonRunningStreams.size() + " out of " + streamsList.size() + " Streams clients did not reach the RUNNING state. " +
+                            "Non-running Streams clients: " + nonRunningStreams
                     );
                 }
 
@@ -1079,7 +1129,7 @@ public class IntegrationTestUtils {
                                                final String applicationId) {
         try {
             final ConsumerGroupDescription groupDescription =
-                    adminClient.describeConsumerGroups(Collections.singletonList(applicationId))
+                    adminClient.describeConsumerGroups(singletonList(applicationId))
                             .describedGroups()
                             .get(applicationId)
                             .get();
@@ -1262,7 +1312,7 @@ public class IntegrationTestUtils {
                                                                  final long waitTime,
                                                                  final int maxMessages) {
         final List<ConsumerRecord<K, V>> consumerRecords;
-        consumer.subscribe(Collections.singletonList(topic));
+        consumer.subscribe(singletonList(topic));
         final int pollIntervalMs = 100;
         consumerRecords = new ArrayList<>();
         int totalPollTimeMs = 0;
@@ -1386,6 +1436,41 @@ public class IntegrationTestUtils {
         }
     }
 
+    public static long getTopicSize(final Properties consumerConfig, final String topicName) {
+        long sum = 0;
+        try (final Consumer<Object, Object> consumer = createConsumer(consumerConfig)) {
+            final Collection<TopicPartition> partitions = consumer.partitionsFor(topicName)
+                .stream()
+                .map(info -> new TopicPartition(topicName, info.partition()))
+                .collect(Collectors.toList());
+            final Map<TopicPartition, Long> beginningOffsets = consumer.beginningOffsets(partitions);
+            final Map<TopicPartition, Long> endOffsets = consumer.endOffsets(partitions);
+
+            for (final TopicPartition partition : beginningOffsets.keySet()) {
+                sum += endOffsets.get(partition) - beginningOffsets.get(partition);
+            }
+        }
+        return sum;
+    }
+
+    private static Double getStreamsPollNumber(final KafkaStreams kafkaStreams) {
+        return (Double) kafkaStreams.metrics()
+            .entrySet()
+            .stream()
+            .filter(entry -> entry.getKey().name().equals("poll-total"))
+            .findFirst().get()
+            .getValue()
+            .metricValue();
+    }
+
+    public static void waitUntilStreamsHasPolled(final KafkaStreams kafkaStreams, final int pollNumber)
+        throws InterruptedException {
+        final Double initialCount = getStreamsPollNumber(kafkaStreams);
+        retryOnExceptionWithTimeout(10000, () -> {
+            assertThat(getStreamsPollNumber(kafkaStreams), is(greaterThanOrEqualTo(initialCount + pollNumber)));
+        });
+    }
+
     public static class StableAssignmentListener implements AssignmentListener {
         final AtomicInteger numStableAssignments = new AtomicInteger(0);
         int nextExpectedNumStableAssignments;
@@ -1433,6 +1518,15 @@ public class IntegrationTestUtils {
         public final Map<TopicPartition, AtomicLong> changelogToStartOffset = new ConcurrentHashMap<>();
         public final Map<TopicPartition, AtomicLong> changelogToEndOffset = new ConcurrentHashMap<>();
         public final Map<TopicPartition, AtomicLong> changelogToTotalNumRestored = new ConcurrentHashMap<>();
+        private final AtomicLong restored;
+
+        public TrackingStateRestoreListener() {
+            restored = null;
+        }
+
+        public TrackingStateRestoreListener(final AtomicLong restored) {
+            this.restored = restored;
+        }
 
         @Override
         public void onRestoreStart(final TopicPartition topicPartition,
@@ -1456,6 +1550,9 @@ public class IntegrationTestUtils {
         public void onRestoreEnd(final TopicPartition topicPartition,
                                  final String storeName,
                                  final long totalRestored) {
+            if (restored != null) {
+                restored.addAndGet(totalRestored);
+            }
         }
 
         public long totalNumRestored() {
@@ -1464,6 +1561,28 @@ public class IntegrationTestUtils {
                 totalNumRestored += numRestored.get();
             }
             return totalNumRestored;
+        }
+    }
+
+    public static class TrackingStandbyUpdateListener implements StandbyUpdateListener {
+        public final List<TopicPartition> promotedPartitions = new ArrayList<>();
+
+
+        @Override
+        public void onUpdateStart(final TopicPartition topicPartition, final String storeName, final long startingOffset) {
+
+        }
+
+        @Override
+        public void onBatchLoaded(final TopicPartition topicPartition, final String storeName, final TaskId taskId, final long batchEndOffset, final long batchSize, final long currentEndOffset) {
+
+        }
+
+        @Override
+        public void onUpdateSuspended(final TopicPartition topicPartition, final String storeName, final long storeOffset, final long currentEndOffset, final SuspendReason reason) {
+            if (reason.equals(SuspendReason.PROMOTED)) {
+                promotedPartitions.add(topicPartition);
+            }
         }
     }
 

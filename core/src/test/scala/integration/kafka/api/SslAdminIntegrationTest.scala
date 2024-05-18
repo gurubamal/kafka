@@ -12,13 +12,10 @@
   */
 package kafka.api
 
-import java.io.File
 import java.util
 import java.util.concurrent._
 import com.yammer.metrics.core.Gauge
-import kafka.metrics.KafkaYammerMetrics
 import kafka.security.authorizer.AclAuthorizer
-import kafka.server.KafkaConfig
 import kafka.utils.TestUtils
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig, CreateAclsResult}
 import org.apache.kafka.common.acl._
@@ -26,6 +23,8 @@ import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.resource.{PatternType, ResourcePattern, ResourceType}
 import org.apache.kafka.common.security.auth.{KafkaPrincipal, SecurityProtocol}
 import org.apache.kafka.server.authorizer._
+import org.apache.kafka.server.config.ZkConfigs
+import org.apache.kafka.server.metrics.KafkaYammerMetrics
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotNull, assertTrue}
 import org.junit.jupiter.api.{AfterEach, Test}
 
@@ -80,10 +79,10 @@ object SslAdminIntegrationTest {
 class SslAdminIntegrationTest extends SaslSslAdminIntegrationTest {
   override val authorizationAdmin = new AclAuthorizationAdmin(classOf[SslAdminIntegrationTest.TestableAclAuthorizer], classOf[AclAuthorizer])
 
-  this.serverConfig.setProperty(KafkaConfig.ZkEnableSecureAclsProp, "true")
+  this.serverConfig.setProperty(ZkConfigs.ZK_ENABLE_SECURE_ACLS_CONFIG, "true")
 
   override protected def securityProtocol = SecurityProtocol.SSL
-  override protected lazy val trustStoreFile = Some(File.createTempFile("truststore", ".jks"))
+  override protected lazy val trustStoreFile = Some(TestUtils.tempFile("truststore", ".jks"))
   private val adminClients = mutable.Buffer.empty[Admin]
 
   override def setUpSasl(): Unit = {

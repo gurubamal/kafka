@@ -19,7 +19,8 @@ package kafka.metrics
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
-import kafka.utils.{Logging, MockTime}
+import kafka.utils.Logging
+import org.apache.kafka.server.util.MockTime
 import org.apache.kafka.test.TestUtils
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertTrue}
 import org.junit.jupiter.api.{Test, Timeout}
@@ -27,7 +28,7 @@ import org.junit.jupiter.api.{Test, Timeout}
 @Timeout(120)
 class LinuxIoMetricsCollectorTest extends Logging {
 
-  class TestDirectory() {
+  class TestDirectory {
     val baseDir = TestUtils.tempDirectory()
     val selfDir = Files.createDirectories(baseDir.toPath.resolve("self"))
 

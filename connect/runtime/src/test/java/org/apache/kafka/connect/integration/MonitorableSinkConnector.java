@@ -20,7 +20,7 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.Task;
-import org.apache.kafka.connect.runtime.TestSinkConnector;
+import org.apache.kafka.connect.runtime.SampleSinkConnector;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.slf4j.Logger;
@@ -39,9 +39,12 @@ import java.util.Map;
  * which are initiated by the embedded connector, and wait for them to consume a desired number of
  * messages.
  */
-public class MonitorableSinkConnector extends TestSinkConnector {
+public class MonitorableSinkConnector extends SampleSinkConnector {
 
     private static final Logger log = LoggerFactory.getLogger(MonitorableSinkConnector.class);
+
+    // Boolean valued configuration that determines whether MonitorableSinkConnector::alterOffsets should return true or false
+    public static final String ALTER_OFFSETS_RESULT = "alter.offsets.result";
 
     private String connectorName;
     private Map<String, String> commonConfigs;
@@ -84,9 +87,13 @@ public class MonitorableSinkConnector extends TestSinkConnector {
         return new ConfigDef();
     }
 
+    @Override
+    public boolean alterOffsets(Map<String, String> connectorConfig, Map<TopicPartition, Long> offsets) {
+        return Boolean.parseBoolean(connectorConfig.get(ALTER_OFFSETS_RESULT));
+    }
+
     public static class MonitorableSinkTask extends SinkTask {
 
-        private String connectorName;
         private String taskId;
         TaskHandle taskHandle;
         Map<TopicPartition, Integer> committedOffsets;
@@ -105,7 +112,7 @@ public class MonitorableSinkConnector extends TestSinkConnector {
         @Override
         public void start(Map<String, String> props) {
             taskId = props.get("task.id");
-            connectorName = props.get("connector.name");
+            String connectorName = props.get("connector.name");
             taskHandle = RuntimeHandles.get().connectorHandle(connectorName).taskHandle(taskId);
             log.debug("Starting task {}", taskId);
             taskHandle.recordTaskStart();

@@ -35,6 +35,7 @@ import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.Time
+import org.apache.kafka.server.config.ReplicationConfigs
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test, TestInfo}
 
@@ -54,7 +55,7 @@ class BrokerEpochIntegrationTest extends QuorumTestHarness {
       TestUtils.createBrokerConfig(brokerId2, zkConnect))
 
     configs.foreach { config =>
-        config.setProperty(KafkaConfig.AutoLeaderRebalanceEnableProp, false.toString)}
+        config.setProperty(ReplicationConfigs.AUTO_LEADER_REBALANCE_ENABLE_CONFIG, false.toString)}
 
     // start both servers
     servers = configs.map(config => TestUtils.createServer(KafkaConfig.fromProps(config)))
@@ -131,9 +132,14 @@ class BrokerEpochIntegrationTest extends QuorumTestHarness {
     val controllerContext = new ControllerContext
     controllerContext.setLiveBrokers(brokerAndEpochs)
     val metrics = new Metrics
-    val controllerChannelManager = new ControllerChannelManager(controllerContext, controllerConfig, Time.SYSTEM,
-      metrics, new StateChangeLogger(controllerId, inControllerContext = true, None))
-    controllerChannelManager.startup()
+    val controllerChannelManager = new ControllerChannelManager(
+      () => controllerContext.epoch,
+      controllerConfig,
+      Time.SYSTEM,
+      metrics,
+      new StateChangeLogger(controllerId, inControllerContext = true, None)
+    )
+    controllerChannelManager.startup(controllerContext.liveOrShuttingDownBrokers)
 
     val broker2 = servers(brokerId2)
     val epochInRequest = broker2.kafkaController.brokerEpoch + epochInRequestDiffFromCurrentEpoch
@@ -147,9 +153,9 @@ class BrokerEpochIntegrationTest extends QuorumTestHarness {
             .setPartitionIndex(tp.partition)
             .setControllerEpoch(controllerEpoch)
             .setLeader(brokerId2)
-            .setLeaderEpoch(LeaderAndIsr.initialLeaderEpoch + 1)
+            .setLeaderEpoch(LeaderAndIsr.InitialLeaderEpoch + 1)
             .setIsr(Seq(brokerId1, brokerId2).map(Integer.valueOf).asJava)
-            .setZkVersion(LeaderAndIsr.initialZKVersion)
+            .setPartitionEpoch(LeaderAndIsr.InitialPartitionEpoch)
             .setReplicas(Seq(0, 1).map(Integer.valueOf).asJava)
             .setIsNew(false)
         )
@@ -177,9 +183,9 @@ class BrokerEpochIntegrationTest extends QuorumTestHarness {
             .setPartitionIndex(tp.partition)
             .setControllerEpoch(controllerEpoch)
             .setLeader(brokerId2)
-            .setLeaderEpoch(LeaderAndIsr.initialLeaderEpoch + 1)
+            .setLeaderEpoch(LeaderAndIsr.InitialLeaderEpoch + 1)
             .setIsr(Seq(brokerId1, brokerId2).map(Integer.valueOf).asJava)
-            .setZkVersion(LeaderAndIsr.initialZKVersion)
+            .setZkVersion(LeaderAndIsr.InitialPartitionEpoch)
             .setReplicas(Seq(0, 1).map(Integer.valueOf).asJava))
         val liveBrokers = brokerAndEpochs.map { case (broker, _) =>
           val securityProtocol = SecurityProtocol.PLAINTEXT
@@ -220,7 +226,7 @@ class BrokerEpochIntegrationTest extends QuorumTestHarness {
             .setTopicName(tp.topic())
             .setPartitionStates(Seq(new StopReplicaPartitionState()
               .setPartitionIndex(tp.partition())
-              .setLeaderEpoch(LeaderAndIsr.initialLeaderEpoch + 2)
+              .setLeaderEpoch(LeaderAndIsr.InitialLeaderEpoch + 2)
               .setDeletePartition(true)).asJava)
         ).asJava
         val requestBuilder = new StopReplicaRequest.Builder(

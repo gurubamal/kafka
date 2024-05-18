@@ -35,6 +35,7 @@ import org.apache.kafka.streams.processor.StateRestoreCallback;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.To;
+import org.apache.kafka.streams.processor.api.FixedKeyRecord;
 import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.internals.AbstractProcessorContext;
 import org.apache.kafka.streams.processor.internals.ChangelogRecordDeserializationHelper;
@@ -212,6 +213,7 @@ public class InternalMockProcessorContext<KOut, VOut>
         this(stateDir, keySerde, valueSerde, metrics, config, collectorSupplier, cache, time, new TaskId(0, 0));
     }
 
+    @SuppressWarnings("this-escape")
     public InternalMockProcessorContext(final File stateDir,
                                         final Serde<?> keySerde,
                                         final Serde<?> valueSerde,
@@ -459,7 +461,9 @@ public class InternalMockProcessorContext<KOut, VOut>
             taskId().partition(),
             timestamp,
             BYTES_KEY_SERIALIZER,
-            BYTEARRAY_VALUE_SERIALIZER);
+            BYTEARRAY_VALUE_SERIALIZER,
+            null,
+            null);
     }
 
     @Override
@@ -499,5 +503,19 @@ public class InternalMockProcessorContext<KOut, VOut>
     @Override
     public String changelogFor(final String storeName) {
         return storeToChangelogTopic.get(storeName);
+    }
+
+    @Override
+    public <K extends KOut, V extends VOut> void forward(final FixedKeyRecord<K, V> record) {
+        forward(new Record<>(record.key(), record.value(), record.timestamp(), record.headers()));
+    }
+
+    @Override
+    public <K extends KOut, V extends VOut> void forward(final FixedKeyRecord<K, V> record,
+                                                         final String childName) {
+        forward(
+            new Record<>(record.key(), record.value(), record.timestamp(), record.headers()),
+            childName
+        );
     }
 }

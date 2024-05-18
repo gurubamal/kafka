@@ -23,9 +23,13 @@ import org.apache.kafka.clients.NodeApiVersions;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerGroupMetadata;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.producer.internals.FutureRecordMetadata;
+import org.apache.kafka.clients.producer.internals.ProduceRequestResult;
 import org.apache.kafka.clients.producer.internals.ProducerInterceptors;
 import org.apache.kafka.clients.producer.internals.ProducerMetadata;
+import org.apache.kafka.clients.producer.internals.RecordAccumulator;
 import org.apache.kafka.clients.producer.internals.Sender;
+import org.apache.kafka.clients.producer.internals.TransactionManager;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Metric;
@@ -33,8 +37,10 @@ import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.SslConfigs;
+import org.apache.kafka.common.errors.ClusterAuthorizationException;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.errors.RecordTooLargeException;
@@ -45,12 +51,14 @@ import org.apache.kafka.common.message.AddOffsetsToTxnResponseData;
 import org.apache.kafka.common.message.EndTxnResponseData;
 import org.apache.kafka.common.message.InitProducerIdResponseData;
 import org.apache.kafka.common.message.TxnOffsetCommitRequestData;
+import org.apache.kafka.common.metrics.JmxReporter;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
 import org.apache.kafka.common.network.Selectable;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.Record;
 import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.requests.AddOffsetsToTxnResponse;
 import org.apache.kafka.common.requests.EndTxnResponse;
@@ -66,6 +74,9 @@ import org.apache.kafka.common.requests.TxnOffsetCommitResponse;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.telemetry.internals.ClientTelemetryReporter;
+import org.apache.kafka.common.telemetry.internals.ClientTelemetrySender;
+import org.apache.kafka.common.utils.KafkaThread;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Time;
@@ -74,12 +85,14 @@ import org.apache.kafka.test.MockPartitioner;
 import org.apache.kafka.test.MockProducerInterceptor;
 import org.apache.kafka.test.MockSerializer;
 import org.apache.kafka.test.TestUtils;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedStatic;
+import org.mockito.internal.stubbing.answers.CallsRealMethods;
 
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -105,12 +118,16 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
 
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -120,9 +137,12 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.notNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -151,9 +171,10 @@ public class KafkaProducerTest {
                     new PartitionInfo(topic, 2, null, null, null)),
             Collections.emptySet(),
             Collections.emptySet());
+    private TestInfo testInfo;
+
     private static final int DEFAULT_METADATA_IDLE_MS = 5 * 60 * 1000;
     private static final Node NODE = new Node(0, "host1", 1000);
-
 
     private static <K, V> KafkaProducer<K, V> kafkaProducer(Map<String, Object> configs,
                   Serializer<K> keySerializer,
@@ -163,7 +184,12 @@ public class KafkaProducerTest {
                   ProducerInterceptors<K, V> interceptors,
                   Time time) {
         return new KafkaProducer<>(new ProducerConfig(ProducerConfig.appendSerializerToConfig(configs, keySerializer, valueSerializer)),
-                keySerializer, valueSerializer, metadata, kafkaClient, interceptors, time);
+            keySerializer, valueSerializer, metadata, kafkaClient, interceptors, time);
+    }
+
+    @BeforeEach
+    public void setup(TestInfo testInfo) {
+        this.testInfo = testInfo;
     }
 
     @Test
@@ -233,6 +259,32 @@ public class KafkaProducerTest {
             config.getString(ProducerConfig.ACKS_CONFIG),
             "acks should be overwritten");
 
+        Properties validProps4 = new Properties() {{
+                putAll(baseProps);
+                setProperty(ProducerConfig.ACKS_CONFIG, "0");
+            }};
+        config = new ProducerConfig(validProps4);
+        assertFalse(
+            config.getBoolean(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG),
+            "idempotence should be disabled when acks not set to all and `enable.idempotence` config is unset.");
+        assertEquals(
+            "0",
+            config.getString(ProducerConfig.ACKS_CONFIG),
+            "acks should be set with overridden value");
+
+        Properties validProps5 = new Properties() {{
+                putAll(baseProps);
+                setProperty(ProducerConfig.ACKS_CONFIG, "1");
+            }};
+        config = new ProducerConfig(validProps5);
+        assertFalse(
+            config.getBoolean(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG),
+            "idempotence should be disabled when acks not set to all and `enable.idempotence` config is unset.");
+        assertEquals(
+            "1",
+            config.getString(ProducerConfig.ACKS_CONFIG),
+            "acks should be set with overridden value");
+
         Properties invalidProps = new Properties() {{
                 putAll(baseProps);
                 setProperty(ProducerConfig.ACKS_CONFIG, "0");
@@ -258,21 +310,12 @@ public class KafkaProducerTest {
         Properties invalidProps3 = new Properties() {{
                 putAll(baseProps);
                 setProperty(ProducerConfig.ACKS_CONFIG, "0");
-            }};
-        assertThrows(
-            ConfigException.class,
-            () -> new ProducerConfig(invalidProps3),
-            "Must set acks to all in order to use the idempotent producer");
-
-        Properties invalidProps4 = new Properties() {{
-                putAll(baseProps);
-                setProperty(ProducerConfig.ACKS_CONFIG, "0");
                 setProperty(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "transactionalId");
             }};
         assertThrows(
             ConfigException.class,
-            () -> new ProducerConfig(invalidProps4),
-            "Must set retries to non-zero when using the idempotent producer.");
+            () -> new ProducerConfig(invalidProps3),
+            "Must set acks to all when using the transactional producer.");
     }
 
     @Test
@@ -297,6 +340,19 @@ public class KafkaProducerTest {
             config.getInt(ProducerConfig.RETRIES_CONFIG),
             "retries should be overwritten");
 
+        Properties validProps2 = new Properties() {{
+                putAll(baseProps);
+                setProperty(ProducerConfig.RETRIES_CONFIG, "0");
+            }};
+        config = new ProducerConfig(validProps2);
+        assertFalse(
+            config.getBoolean(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG),
+            "idempotence should be disabled when retries set to 0 and `enable.idempotence` config is unset.");
+        assertEquals(
+            0,
+            config.getInt(ProducerConfig.RETRIES_CONFIG),
+            "retries should be set with overridden value");
+
         Properties invalidProps = new Properties() {{
                 putAll(baseProps);
                 setProperty(ProducerConfig.RETRIES_CONFIG, "0");
@@ -311,6 +367,8 @@ public class KafkaProducerTest {
         Properties invalidProps2 = new Properties() {{
                 putAll(baseProps);
                 setProperty(ProducerConfig.RETRIES_CONFIG, "0");
+                // explicitly enabling idempotence should still throw exception
+                setProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
             }};
         assertThrows(
             ConfigException.class,
@@ -320,23 +378,12 @@ public class KafkaProducerTest {
         Properties invalidProps3 = new Properties() {{
                 putAll(baseProps);
                 setProperty(ProducerConfig.RETRIES_CONFIG, "0");
-                // explicitly enabling idempotence should still throw exception
-                setProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
-            }};
-        assertThrows(
-            ConfigException.class,
-            () -> new ProducerConfig(invalidProps3),
-            "Must set retries to non-zero when using the idempotent producer.");
-
-        Properties invalidProps4 = new Properties() {{
-                putAll(baseProps);
-                setProperty(ProducerConfig.RETRIES_CONFIG, "0");
                 setProperty(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "transactionalId");
             }};
         assertThrows(
             ConfigException.class,
-            () -> new ProducerConfig(invalidProps4),
-            "Must set retries to non-zero when using the idempotent producer.");
+            () -> new ProducerConfig(invalidProps3),
+            "Must set retries to non-zero when using the transactional producer.");
     }
 
     @Test
@@ -349,7 +396,7 @@ public class KafkaProducerTest {
 
         Properties validProps = new Properties() {{
                 putAll(baseProps);
-                setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "10");
+                setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "6");
                 setProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "false");
             }};
         ProducerConfig config = new ProducerConfig(validProps);
@@ -357,9 +404,23 @@ public class KafkaProducerTest {
             config.getBoolean(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG),
             "idempotence should be overwritten");
         assertEquals(
-            10,
+            6,
             config.getInt(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION),
             "max.in.flight.requests.per.connection should be overwritten");
+
+        Properties validProps2 = new Properties() {{
+                putAll(baseProps);
+                setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "6");
+            }};
+        config = new ProducerConfig(validProps2);
+        assertFalse(
+            config.getBoolean(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG),
+            "idempotence should be disabled when `max.in.flight.requests.per.connection` is greater than 5 and " +
+                "`enable.idempotence` config is unset.");
+        assertEquals(
+            6,
+            config.getInt(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION),
+            "`max.in.flight.requests.per.connection` should be set with overridden value");
 
         Properties invalidProps = new Properties() {{
                 putAll(baseProps);
@@ -374,7 +435,9 @@ public class KafkaProducerTest {
 
         Properties invalidProps2 = new Properties() {{
                 putAll(baseProps);
-                setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "10");
+                setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "6");
+                // explicitly enabling idempotence should still throw exception
+                setProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
             }};
         assertThrows(
             ConfigException.class,
@@ -383,23 +446,12 @@ public class KafkaProducerTest {
 
         Properties invalidProps3 = new Properties() {{
                 putAll(baseProps);
-                setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "10");
-                // explicitly enabling idempotence should still throw exception
-                setProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true");
-            }};
-        assertThrows(
-            ConfigException.class,
-            () -> new ProducerConfig(invalidProps3),
-            "Must set max.in.flight.requests.per.connection to at most 5 when using the idempotent producer.");
-
-        Properties invalidProps4 = new Properties() {{
-                putAll(baseProps);
-                setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "10");
+                setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, "6");
                 setProperty(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "transactionalId");
             }};
         assertThrows(
             ConfigException.class,
-            () -> new ProducerConfig(invalidProps4),
+            () -> new ProducerConfig(invalidProps3),
             "Must set retries to non-zero when using the idempotent producer.");
     }
 
@@ -411,9 +463,48 @@ public class KafkaProducerTest {
         KafkaProducer<String, String> producer = new KafkaProducer<>(
                 props, new StringSerializer(), new StringSerializer());
 
-        MockMetricsReporter mockMetricsReporter = (MockMetricsReporter) producer.metrics.reporters().get(0);
+        assertEquals(3, producer.metrics.reporters().size());
 
+        MockMetricsReporter mockMetricsReporter = (MockMetricsReporter) producer.metrics.reporters().stream()
+            .filter(reporter -> reporter instanceof MockMetricsReporter).findFirst().get();
         assertEquals(producer.getClientId(), mockMetricsReporter.clientId);
+
+        producer.close();
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    public void testDisableJmxAndClientTelemetryReporter() {
+        Properties props = new Properties();
+        props.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+        props.setProperty(ProducerConfig.AUTO_INCLUDE_JMX_REPORTER_CONFIG, "false");
+        props.setProperty(ProducerConfig.ENABLE_METRICS_PUSH_CONFIG, "false");
+        KafkaProducer<String, String> producer = new KafkaProducer<>(props, new StringSerializer(), new StringSerializer());
+        assertTrue(producer.metrics.reporters().isEmpty());
+        producer.close();
+    }
+
+    @Test
+    public void testExplicitlyOnlyEnableJmxReporter() {
+        Properties props = new Properties();
+        props.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+        props.setProperty(ProducerConfig.METRIC_REPORTER_CLASSES_CONFIG, "org.apache.kafka.common.metrics.JmxReporter");
+        props.setProperty(ProducerConfig.ENABLE_METRICS_PUSH_CONFIG, "false");
+        KafkaProducer<String, String> producer = new KafkaProducer<>(props, new StringSerializer(), new StringSerializer());
+        assertEquals(1, producer.metrics.reporters().size());
+        assertInstanceOf(JmxReporter.class, producer.metrics.reporters().get(0));
+        producer.close();
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    public void testExplicitlyOnlyEnableClientTelemetryReporter() {
+        Properties props = new Properties();
+        props.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+        props.setProperty(ProducerConfig.AUTO_INCLUDE_JMX_REPORTER_CONFIG, "false");
+        KafkaProducer<String, String> producer = new KafkaProducer<>(props, new StringSerializer(), new StringSerializer());
+        assertEquals(1, producer.metrics.reporters().size());
+        assertInstanceOf(ClientTelemetryReporter.class, producer.metrics.reporters().get(0));
         producer.close();
     }
 
@@ -429,6 +520,12 @@ public class KafkaProducerTest {
         Properties producerProps = new Properties();
         producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9000");
         assertThrows(ConfigException.class, () -> new KafkaProducer(producerProps));
+
+        final Map<String, Object> configs = new HashMap<>();
+        configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+
+        // Invalid value null for configuration key.serializer: must be non-null.
+        assertThrows(ConfigException.class, () -> new KafkaProducer<String, String>(configs));
     }
 
     @Test
@@ -454,11 +551,10 @@ public class KafkaProducerTest {
         Properties props = new Properties();
         props.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
         props.put(1, "not string key");
-        try (KafkaProducer<?, ?> ff = new KafkaProducer<>(props, new StringSerializer(), new StringSerializer())) {
-            fail("Constructor should throw exception");
-        } catch (ConfigException e) {
-            assertTrue(e.getMessage().contains("not string key"), "Unexpected exception message: " + e.getMessage());
-        }
+        ConfigException ce = assertThrows(
+            ConfigException.class,
+            () -> new KafkaProducer<>(props, new StringSerializer(), new StringSerializer()));
+        assertTrue(ce.getMessage().contains("not string key"), "Unexpected exception message: " + ce.getMessage());
     }
 
     @Test
@@ -506,7 +602,31 @@ public class KafkaProducerTest {
             MockProducerInterceptor.resetCounters();
         }
     }
+    @Test
+    public void testInterceptorConstructorConfigurationWithExceptionShouldCloseRemainingInstances() {
+        final int targetInterceptor = 3;
+        try {
+            Properties props = new Properties();
+            props.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+            props.setProperty(ProducerConfig.INTERCEPTOR_CLASSES_CONFIG, org.apache.kafka.test.MockProducerInterceptor.class.getName() + ", "
+                    +  org.apache.kafka.test.MockProducerInterceptor.class.getName() + ", "
+                    +  org.apache.kafka.test.MockProducerInterceptor.class.getName());
+            props.setProperty(MockProducerInterceptor.APPEND_STRING_PROP, "something");
 
+            MockProducerInterceptor.setThrowOnConfigExceptionThreshold(targetInterceptor);
+
+            assertThrows(KafkaException.class, () -> {
+                new KafkaProducer<>(
+                        props, new StringSerializer(), new StringSerializer());
+            });
+
+            assertEquals(3, MockProducerInterceptor.CONFIG_COUNT.get());
+            assertEquals(3, MockProducerInterceptor.CLOSE_COUNT.get());
+
+        } finally {
+            MockProducerInterceptor.resetCounters();
+        }
+    }
     @Test
     public void testPartitionerClose() {
         try {
@@ -538,7 +658,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
 
@@ -572,7 +692,7 @@ public class KafkaProducerTest {
             TestUtils.waitForCondition(() -> closeException.get() != null,
                     "InterruptException did not occur within timeout.");
 
-            assertTrue(closeException.get() instanceof InterruptException, "Expected exception not thrown " + closeException);
+            assertInstanceOf(InterruptException.class, closeException.get(), "Expected exception not thrown " + closeException);
         } finally {
             executor.shutdownNow();
         }
@@ -611,7 +731,7 @@ public class KafkaProducerTest {
 
     private static KafkaProducer<String, String> producerWithOverrideNewSender(Map<String, Object> configs,
                                                                                ProducerMetadata metadata,
-                                                                               Time timer) {
+                                                                               Time time) {
         // let mockClient#leastLoadedNode return the node directly so that we can isolate Metadata calls from KafkaProducer for idempotent producer
         MockClient mockClient = new MockClient(Time.SYSTEM, metadata) {
             @Override
@@ -622,11 +742,11 @@ public class KafkaProducerTest {
 
         return new KafkaProducer<String, String>(
                 new ProducerConfig(ProducerConfig.appendSerializerToConfig(configs, new StringSerializer(), new StringSerializer())),
-                new StringSerializer(), new StringSerializer(), metadata, mockClient, null, timer) {
+                new StringSerializer(), new StringSerializer(), metadata, mockClient, null, time) {
             @Override
             Sender newSender(LogContext logContext, KafkaClient kafkaClient, ProducerMetadata metadata) {
                 // give Sender its own Metadata instance so that we can isolate Metadata calls from KafkaProducer
-                return super.newSender(logContext, kafkaClient, newMetadata(0, 100_000));
+                return super.newSender(logContext, kafkaClient, newMetadata(0, 0, 100_000));
             }
         };
     }
@@ -728,9 +848,7 @@ public class KafkaProducerTest {
         verify(metadata, times(4)).awaitUpdate(anyInt(), anyLong());
         verify(metadata, times(5)).fetch();
         try {
-            future.get();
-        } catch (ExecutionException e) {
-            assertTrue(e.getCause() instanceof TimeoutException);
+            assertInstanceOf(TimeoutException.class, assertThrows(ExecutionException.class, future::get).getCause());
         } finally {
             producer.close(Duration.ofMillis(0));
         }
@@ -797,9 +915,7 @@ public class KafkaProducerTest {
         verify(metadata, times(4)).awaitUpdate(anyInt(), anyLong());
         verify(metadata, times(5)).fetch();
         try {
-            future.get();
-        } catch (ExecutionException e) {
-            assertTrue(e.getCause() instanceof TimeoutException);
+            assertInstanceOf(TimeoutException.class, assertThrows(ExecutionException.class, future::get).getCause());
         } finally {
             producer.close(Duration.ofMillis(0));
         }
@@ -813,10 +929,11 @@ public class KafkaProducerTest {
         // test under normal producer for simplicity
         configs.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
         long refreshBackoffMs = 500L;
+        long refreshBackoffMaxMs = 5000L;
         long metadataExpireMs = 60000L;
         long metadataIdleMs = 60000L;
         final Time time = new MockTime();
-        final ProducerMetadata metadata = new ProducerMetadata(refreshBackoffMs, metadataExpireMs, metadataIdleMs,
+        final ProducerMetadata metadata = new ProducerMetadata(refreshBackoffMs, refreshBackoffMaxMs, metadataExpireMs, metadataIdleMs,
                 new LogContext(), new ClusterResourceListeners(), time);
         final String topic = "topic";
         try (KafkaProducer<String, String> producer = kafkaProducer(configs,
@@ -847,10 +964,11 @@ public class KafkaProducerTest {
         configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
         configs.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "30000");
         long refreshBackoffMs = 500L;
+        long refreshBackoffMaxMs = 5000L;
         long metadataExpireMs = 60000L;
         long metadataIdleMs = 60000L;
         final Time time = new MockTime();
-        final ProducerMetadata metadata = new ProducerMetadata(refreshBackoffMs, metadataExpireMs, metadataIdleMs,
+        final ProducerMetadata metadata = new ProducerMetadata(refreshBackoffMs, refreshBackoffMaxMs, metadataExpireMs, metadataIdleMs,
                 new LogContext(), new ClusterResourceListeners(), time);
         final String topic = "topic";
         try (KafkaProducer<String, String> producer = kafkaProducer(configs, new StringSerializer(),
@@ -903,7 +1021,7 @@ public class KafkaProducerTest {
 
         long nowMs = Time.SYSTEM.milliseconds();
         String topic = "topic";
-        ProducerMetadata metadata = newMetadata(0, 90000);
+        ProducerMetadata metadata = newMetadata(0, 0, 90000);
         metadata.add(topic, nowMs);
 
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap(topic, 1));
@@ -965,7 +1083,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -997,7 +1115,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -1042,7 +1160,7 @@ public class KafkaProducerTest {
         ProducerRecord<String, String> record = new ProducerRecord<>(topic, "value");
 
         long nowMs = Time.SYSTEM.milliseconds();
-        ProducerMetadata metadata = newMetadata(0, 90000);
+        ProducerMetadata metadata = newMetadata(0, 0, 90000);
         metadata.add(topic, nowMs);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap(topic, 1));
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, nowMs);
@@ -1082,7 +1200,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1122,7 +1240,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1157,7 +1275,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -1175,6 +1293,35 @@ public class KafkaProducerTest {
     }
 
     @Test
+    public void testClusterAuthorizationFailure() throws Exception {
+        int maxBlockMs = 500;
+
+        Map<String, Object> configs = new HashMap<>();
+        configs.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, maxBlockMs);
+        configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9000");
+        configs.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+        configs.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "some-txn");
+
+        Time time = new MockTime(1);
+        MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
+        ProducerMetadata metadata = newMetadata(500, 5000, Long.MAX_VALUE);
+
+        MockClient client = new MockClient(time, metadata);
+        client.updateMetadata(initialUpdateResponse);
+
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.NONE, "some-txn", NODE));
+        client.prepareResponse(initProducerIdResponse(1L, (short) 5, Errors.CLUSTER_AUTHORIZATION_FAILED));
+        Producer<String, String> producer = kafkaProducer(configs, new StringSerializer(),
+                new StringSerializer(), metadata, client, null, time);
+        assertThrows(ClusterAuthorizationException.class, producer::initTransactions);
+
+        // retry initTransactions after the ClusterAuthorizationException not being thrown
+        client.prepareResponse(initProducerIdResponse(1L, (short) 5, Errors.NONE));
+        TestUtils.retryOnExceptionWithTimeout(1000, 100, producer::initTransactions);
+        producer.close();
+    }
+
+    @Test
     public void testAbortTransaction() {
         Map<String, Object> configs = new HashMap<>();
         configs.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "some.id");
@@ -1182,7 +1329,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -1206,7 +1353,7 @@ public class KafkaProducerTest {
         configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9000");
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
         client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.NONE, "some.id", NODE));
@@ -1342,7 +1489,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, emptyMap());
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1381,7 +1528,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -1428,7 +1575,7 @@ public class KafkaProducerTest {
         Duration tick = Duration.ofSeconds(1);
         Time time = new MockTime(tick.toMillis());
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -1481,7 +1628,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -1530,6 +1677,54 @@ public class KafkaProducerTest {
         verifyInvalidGroupMetadata(new ConsumerGroupMetadata("group", 2, JoinGroupRequest.UNKNOWN_MEMBER_ID, Optional.empty()));
     }
 
+    @Test
+    public void testClientInstanceId() {
+        Properties props = new Properties();
+        props.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+
+        ClientTelemetryReporter clientTelemetryReporter = mock(ClientTelemetryReporter.class);
+        clientTelemetryReporter.configure(any());
+
+        try (MockedStatic<CommonClientConfigs> mockedCommonClientConfigs = mockStatic(CommonClientConfigs.class, new CallsRealMethods())) {
+            mockedCommonClientConfigs.when(() -> CommonClientConfigs.telemetryReporter(anyString(), any())).thenReturn(Optional.of(clientTelemetryReporter));
+
+            ClientTelemetrySender clientTelemetrySender = mock(ClientTelemetrySender.class);
+            Uuid expectedUuid = Uuid.randomUuid();
+            when(clientTelemetryReporter.telemetrySender()).thenReturn(clientTelemetrySender);
+            when(clientTelemetrySender.clientInstanceId(any())).thenReturn(Optional.of(expectedUuid));
+
+            try (KafkaProducer<String, String> producer = new KafkaProducer<>(props, new StringSerializer(), new StringSerializer())) {
+                Uuid uuid = producer.clientInstanceId(Duration.ofMillis(0));
+                assertEquals(expectedUuid, uuid);
+            }
+        }
+    }
+
+    @Test
+    public void testClientInstanceIdInvalidTimeout() {
+        Properties props = new Properties();
+        props.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+
+        KafkaProducer<String, String> producer = new KafkaProducer<>(props, new StringSerializer(), new StringSerializer());
+        Exception exception = assertThrows(IllegalArgumentException.class, () -> producer.clientInstanceId(Duration.ofMillis(-1)));
+        assertEquals("The timeout cannot be negative.", exception.getMessage());
+
+        producer.close();
+    }
+
+    @Test
+    public void testClientInstanceIdNoTelemetryReporterRegistered() {
+        Properties props = new Properties();
+        props.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+        props.setProperty(ProducerConfig.ENABLE_METRICS_PUSH_CONFIG, "false");
+
+        KafkaProducer<String, String> producer = new KafkaProducer<>(props, new StringSerializer(), new StringSerializer());
+        Exception exception = assertThrows(IllegalStateException.class, () -> producer.clientInstanceId(Duration.ofMillis(0)));
+        assertEquals("Telemetry is not enabled. Set config `enable.metrics.push` to `true`.", exception.getMessage());
+
+        producer.close();
+    }
+
     private void verifyInvalidGroupMetadata(ConsumerGroupMetadata groupMetadata) {
         Map<String, Object> configs = new HashMap<>();
         configs.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "some.id");
@@ -1538,7 +1733,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -1592,7 +1787,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1616,7 +1811,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, emptyMap());
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1658,7 +1853,7 @@ public class KafkaProducerTest {
         String topicName = "test";
         Time time = Time.SYSTEM;
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, emptyMap());
-        ProducerMetadata metadata = new ProducerMetadata(0, Long.MAX_VALUE, Long.MAX_VALUE,
+        ProducerMetadata metadata = new ProducerMetadata(0, 0, Long.MAX_VALUE, Long.MAX_VALUE,
                 new LogContext(), new ClusterResourceListeners(), time);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
         MockClient client = new MockClient(time, metadata);
@@ -1700,7 +1895,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, emptyMap());
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1719,7 +1914,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("testTopic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1747,7 +1942,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("testTopic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1776,7 +1971,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime();
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("testTopic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
         metadata.updateWithCurrentRequestVersion(initialUpdateResponse, false, time.milliseconds());
 
         MockClient client = new MockClient(time, metadata);
@@ -1814,8 +2009,8 @@ public class KafkaProducerTest {
         producer.close();
     }
 
-    private static ProducerMetadata newMetadata(long refreshBackoffMs, long expirationMs) {
-        return new ProducerMetadata(refreshBackoffMs, expirationMs, DEFAULT_METADATA_IDLE_MS,
+    private static ProducerMetadata newMetadata(long refreshBackoffMs, long refreshBackoffMaxMs, long expirationMs) {
+        return new ProducerMetadata(refreshBackoffMs, refreshBackoffMaxMs, expirationMs, DEFAULT_METADATA_IDLE_MS,
                 new LogContext(), new ClusterResourceListeners(), Time.SYSTEM);
     }
 
@@ -1860,19 +2055,25 @@ public class KafkaProducerTest {
     }
 
     @Test
-    public void testCallbackHandlesError() throws Exception {
+    public void testCallbackAndInterceptorHandleError() {
         Map<String, Object> configs = new HashMap<>();
         configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9000");
         configs.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "1000");
+        configs.put(ProducerConfig.INTERCEPTOR_CLASSES_CONFIG, MockProducerInterceptor.class.getName());
+        configs.put(MockProducerInterceptor.APPEND_STRING_PROP, "something");
+
 
         Time time = new MockTime();
-        ProducerMetadata producerMetadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata producerMetadata = newMetadata(0, 0, Long.MAX_VALUE);
         MockClient client = new MockClient(time, producerMetadata);
 
         String invalidTopicName = "topic abc"; // Invalid topic name due to space
 
+        ProducerInterceptors<String, String> producerInterceptors =
+                new ProducerInterceptors<>(Arrays.asList(new MockProducerInterceptor()));
+
         try (Producer<String, String> producer = kafkaProducer(configs, new StringSerializer(), new StringSerializer(),
-                producerMetadata, client, null, time)) {
+                producerMetadata, client, producerInterceptors, time)) {
             ProducerRecord<String, String> record = new ProducerRecord<>(invalidTopicName, "HelloKafka");
 
             // Here's the important piece of the test. Let's make sure that the RecordMetadata we get
@@ -1883,7 +2084,6 @@ public class KafkaProducerTest {
 
                 assertNotNull(recordMetadata.topic(), "Topic name should be valid even on send failure");
                 assertEquals(invalidTopicName, recordMetadata.topic());
-                assertNotNull(recordMetadata.partition(), "Partition should be valid even on send failure");
 
                 assertFalse(recordMetadata.hasOffset());
                 assertEquals(ProduceResponse.INVALID_OFFSET, recordMetadata.offset());
@@ -1897,6 +2097,7 @@ public class KafkaProducerTest {
             };
 
             producer.send(record, callBack);
+            assertEquals(1, MockProducerInterceptor.ON_ACKNOWLEDGEMENT_COUNT.intValue());
         }
     }
 
@@ -1908,7 +2109,7 @@ public class KafkaProducerTest {
 
         Time time = new MockTime(1);
         MetadataResponse initialUpdateResponse = RequestTestUtils.metadataUpdateWith(1, singletonMap("topic", 1));
-        ProducerMetadata metadata = newMetadata(0, Long.MAX_VALUE);
+        ProducerMetadata metadata = newMetadata(0, 0, Long.MAX_VALUE);
 
         MockClient client = new MockClient(time, metadata);
         client.updateMetadata(initialUpdateResponse);
@@ -1918,6 +2119,202 @@ public class KafkaProducerTest {
             assertThrows(IllegalArgumentException.class, () -> producer.send(new ProducerRecord<>("topic", "key", "value")));
         }
     }
+
+    @Test
+    public void testPartitionAddedToTransaction() throws Exception {
+        StringSerializer serializer = new StringSerializer();
+        KafkaProducerTestContext<String> ctx = new KafkaProducerTestContext<>(testInfo, serializer);
+
+        String topic = "foo";
+        TopicPartition topicPartition = new TopicPartition(topic, 0);
+        Cluster cluster = TestUtils.singletonCluster(topic, 1);
+
+        when(ctx.sender.isRunning()).thenReturn(true);
+        when(ctx.metadata.fetch()).thenReturn(cluster);
+
+        long timestamp = ctx.time.milliseconds();
+        ProducerRecord<String, String> record = new ProducerRecord<>(topic, null, timestamp, "key", "value");
+        FutureRecordMetadata future = expectAppend(ctx, record, topicPartition, cluster);
+
+        try (KafkaProducer<String, String> producer = ctx.newKafkaProducer()) {
+            assertEquals(future, producer.send(record));
+            assertFalse(future.isDone());
+            verify(ctx.transactionManager).maybeAddPartition(topicPartition);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    @Test
+    public void testPartitionAddedToTransactionAfterFullBatchRetry() throws Exception {
+        StringSerializer serializer = new StringSerializer();
+        KafkaProducerTestContext<String> ctx = new KafkaProducerTestContext<>(testInfo, serializer);
+
+        String topic = "foo";
+        TopicPartition topicPartition0 = new TopicPartition(topic, 0);
+        TopicPartition topicPartition1 = new TopicPartition(topic, 1);
+        Cluster cluster = TestUtils.singletonCluster(topic, 2);
+
+        when(ctx.sender.isRunning()).thenReturn(true);
+        when(ctx.metadata.fetch()).thenReturn(cluster);
+
+        long timestamp = ctx.time.milliseconds();
+        ProducerRecord<String, String> record = new ProducerRecord<>(topic, null, timestamp, "key", "value");
+
+        FutureRecordMetadata future = expectAppendWithAbortForNewBatch(
+            ctx,
+            record,
+            topicPartition0,
+            topicPartition1,
+            cluster
+        );
+
+        try (KafkaProducer<String, String> producer = ctx.newKafkaProducer()) {
+            assertEquals(future, producer.send(record));
+            assertFalse(future.isDone());
+            verify(ctx.partitioner).onNewBatch(topic, cluster, 0);
+            verify(ctx.transactionManager, never()).maybeAddPartition(topicPartition0);
+            verify(ctx.transactionManager).maybeAddPartition(topicPartition1);
+        }
+    }
+
+    private <T> FutureRecordMetadata expectAppend(
+        KafkaProducerTestContext<T> ctx,
+        ProducerRecord<T, T> record,
+        TopicPartition initialSelectedPartition,
+        Cluster cluster
+    ) throws InterruptedException {
+        byte[] serializedKey = ctx.serializer.serialize(topic, record.key());
+        byte[] serializedValue = ctx.serializer.serialize(topic, record.value());
+        long timestamp = record.timestamp() == null ? ctx.time.milliseconds() : record.timestamp();
+
+        ProduceRequestResult requestResult = new ProduceRequestResult(initialSelectedPartition);
+        FutureRecordMetadata futureRecordMetadata = new FutureRecordMetadata(
+            requestResult,
+            5,
+            timestamp,
+            serializedKey.length,
+            serializedValue.length,
+            ctx.time
+        );
+
+        when(ctx.partitioner.partition(
+            initialSelectedPartition.topic(),
+            record.key(),
+            serializedKey,
+            record.value(),
+            serializedValue,
+            cluster
+        )).thenReturn(initialSelectedPartition.partition());
+
+        when(ctx.accumulator.append(
+            eq(initialSelectedPartition.topic()),            // 0
+            eq(initialSelectedPartition.partition()),        // 1
+            eq(timestamp),                                   // 2
+            eq(serializedKey),                               // 3
+            eq(serializedValue),                             // 4
+            eq(Record.EMPTY_HEADERS),                        // 5
+            any(RecordAccumulator.AppendCallbacks.class),    // 6 <--
+            anyLong(),
+            eq(true),
+            anyLong(),
+            any()
+        )).thenAnswer(invocation -> {
+            RecordAccumulator.AppendCallbacks callbacks =
+                (RecordAccumulator.AppendCallbacks) invocation.getArguments()[6];
+            callbacks.setPartition(initialSelectedPartition.partition());
+            return new RecordAccumulator.RecordAppendResult(
+                futureRecordMetadata,
+                false,
+                false,
+                false,
+                0);
+        });
+
+        return futureRecordMetadata;
+    }
+
+    private <T> FutureRecordMetadata expectAppendWithAbortForNewBatch(
+        KafkaProducerTestContext<T> ctx,
+        ProducerRecord<T, T> record,
+        TopicPartition initialSelectedPartition,
+        TopicPartition retrySelectedPartition,
+        Cluster cluster
+    ) throws InterruptedException {
+        byte[] serializedKey = ctx.serializer.serialize(topic, record.key());
+        byte[] serializedValue = ctx.serializer.serialize(topic, record.value());
+        long timestamp = record.timestamp() == null ? ctx.time.milliseconds() : record.timestamp();
+
+        ProduceRequestResult requestResult = new ProduceRequestResult(retrySelectedPartition);
+        FutureRecordMetadata futureRecordMetadata = new FutureRecordMetadata(
+            requestResult,
+            0,
+            timestamp,
+            serializedKey.length,
+            serializedValue.length,
+            ctx.time
+        );
+
+        when(ctx.partitioner.partition(
+            initialSelectedPartition.topic(),
+            record.key(),
+            serializedKey,
+            record.value(),
+            serializedValue,
+            cluster
+        )).thenReturn(initialSelectedPartition.partition())
+          .thenReturn(retrySelectedPartition.partition());
+
+        when(ctx.accumulator.append(
+            eq(initialSelectedPartition.topic()),            // 0
+            eq(initialSelectedPartition.partition()),        // 1
+            eq(timestamp),                                   // 2
+            eq(serializedKey),                               // 3
+            eq(serializedValue),                             // 4
+            eq(Record.EMPTY_HEADERS),                        // 5
+            any(RecordAccumulator.AppendCallbacks.class),    // 6 <--
+            anyLong(),
+            eq(true), // abortOnNewBatch
+            anyLong(),
+            any()
+        )).thenAnswer(invocation -> {
+            RecordAccumulator.AppendCallbacks callbacks =
+                (RecordAccumulator.AppendCallbacks) invocation.getArguments()[6];
+            callbacks.setPartition(initialSelectedPartition.partition());
+            return new RecordAccumulator.RecordAppendResult(
+                null,
+                false,
+                false,
+                true,
+                0);
+        });
+
+        when(ctx.accumulator.append(
+            eq(retrySelectedPartition.topic()),              // 0
+            eq(retrySelectedPartition.partition()),          // 1
+            eq(timestamp),                                   // 2
+            eq(serializedKey),                               // 3
+            eq(serializedValue),                             // 4
+            eq(Record.EMPTY_HEADERS),                        // 5
+            any(RecordAccumulator.AppendCallbacks.class),    // 6 <--
+            anyLong(),
+            eq(false), // abortOnNewBatch
+            anyLong(),
+            any()
+        )).thenAnswer(invocation -> {
+            RecordAccumulator.AppendCallbacks callbacks =
+                (RecordAccumulator.AppendCallbacks) invocation.getArguments()[6];
+            callbacks.setPartition(retrySelectedPartition.partition());
+            return new RecordAccumulator.RecordAppendResult(
+                futureRecordMetadata,
+                false,
+                true,
+                false,
+                0);
+        });
+
+        return futureRecordMetadata;
+    }
+
 
     private static final List<String> CLIENT_IDS = new ArrayList<>();
 
@@ -1987,4 +2384,116 @@ public class KafkaProducerTest {
         public void configure(Map<String, ?> configs) {
         }
     }
+
+    private static class KafkaProducerTestContext<T> {
+        private final TestInfo testInfo;
+        private final Map<String, Object> configs;
+        private final Serializer<T> serializer;
+        private final Partitioner partitioner = mock(Partitioner.class);
+        private final KafkaThread ioThread = mock(KafkaThread.class);
+        private final List<ProducerInterceptor<T, T>> interceptors = new ArrayList<>();
+        private ProducerMetadata metadata = mock(ProducerMetadata.class);
+        private RecordAccumulator accumulator = mock(RecordAccumulator.class);
+        private Sender sender = mock(Sender.class);
+        private TransactionManager transactionManager = mock(TransactionManager.class);
+        private Time time = new MockTime();
+        private final Metrics metrics = new Metrics(time);
+
+        public KafkaProducerTestContext(
+            TestInfo testInfo,
+            Serializer<T> serializer
+        ) {
+            this(testInfo, new HashMap<>(), serializer);
+        }
+
+        public KafkaProducerTestContext(
+            TestInfo testInfo,
+            Map<String, Object> configs,
+            Serializer<T> serializer
+        ) {
+            this.testInfo = testInfo;
+            this.configs = configs;
+            this.serializer = serializer;
+
+            if (!configs.containsKey(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG)) {
+                configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+            }
+        }
+
+        public KafkaProducerTestContext<T> setProducerMetadata(ProducerMetadata metadata) {
+            this.metadata = metadata;
+            return this;
+        }
+
+        public KafkaProducerTestContext<T> setAccumulator(RecordAccumulator accumulator) {
+            this.accumulator = accumulator;
+            return this;
+        }
+
+        public KafkaProducerTestContext<T> setSender(Sender sender) {
+            this.sender = sender;
+            return this;
+        }
+
+        public KafkaProducerTestContext<T> setTransactionManager(TransactionManager transactionManager) {
+            this.transactionManager = transactionManager;
+            return this;
+        }
+
+        public KafkaProducerTestContext<T> addInterceptor(ProducerInterceptor<T, T> interceptor) {
+            this.interceptors.add(interceptor);
+            return this;
+        }
+
+        public KafkaProducerTestContext<T> setTime(Time time) {
+            this.time = time;
+            return this;
+        }
+
+        public KafkaProducer<T, T> newKafkaProducer() {
+            LogContext logContext = new LogContext("[Producer test=" + testInfo.getDisplayName() + "] ");
+
+            ProducerConfig producerConfig = new ProducerConfig(
+                ProducerConfig.appendSerializerToConfig(configs, serializer, serializer));
+
+            ProducerInterceptors<T, T> interceptors = new ProducerInterceptors<>(this.interceptors);
+
+            return new KafkaProducer<>(
+                producerConfig,
+                logContext,
+                metrics,
+                serializer,
+                serializer,
+                metadata,
+                accumulator,
+                transactionManager,
+                sender,
+                interceptors,
+                partitioner,
+                time,
+                ioThread,
+                Optional.empty()
+            );
+        }
+    }
+
+    @Test
+    void testDeliveryTimeoutAndLingerMsConfig() {
+        final Map<String, Object> configs = new HashMap<>();
+        configs.put(ProducerConfig.CLIENT_ID_CONFIG, "testDeliveryTimeoutAndLingerMsConfig");
+        configs.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9999");
+        configs.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 1000);
+        configs.put(ProducerConfig.LINGER_MS_CONFIG, 1000);
+        configs.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 1);
+
+        // delivery.timeout.ms should be equal to or larger than linger.ms + request.timeout.ms
+        assertThrows(KafkaException.class, () -> new KafkaProducer<>(configs, new StringSerializer(), new StringSerializer()));
+
+        configs.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 1000);
+        configs.put(ProducerConfig.LINGER_MS_CONFIG, 999);
+        configs.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 1);
+
+        assertDoesNotThrow(() -> new KafkaProducer<>(configs, new StringSerializer(), new StringSerializer()).close());
+    }
+
 }

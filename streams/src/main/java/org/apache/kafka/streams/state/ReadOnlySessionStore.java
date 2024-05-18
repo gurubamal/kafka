@@ -33,6 +33,18 @@ public interface ReadOnlySessionStore<K, AGG> {
     /**
      * Fetch any sessions with the matching key and the sessions end is &ge; earliestSessionEndTime
      * and the sessions start is &le; latestSessionStartTime iterating from earliest to latest.
+     * I.e., earliestSessionEndTime is the lower bound of the search interval and latestSessionStartTime
+     * is the upper bound of the search interval, and the method returns all sessions that overlap
+     * with the search interval.
+     * Thus, if a session ends before earliestSessionEndTime, or starts after latestSessionStartTime
+     * it won't be contained in the result:
+     * <pre>{@code
+     * earliestSessionEndTime: ESET
+     * latestSessionStartTime: LSST
+     *
+     *                       [ESET............LSST]
+     * [not-included] [included]   [included]   [included] [not-included]
+     * }</pre>
      * <p>
      * This iterator must be closed after use.
      *
@@ -55,6 +67,18 @@ public interface ReadOnlySessionStore<K, AGG> {
     /**
      * Fetch any sessions with the matching key and the sessions end is &ge; earliestSessionEndTime
      * and the sessions start is &le; latestSessionStartTime iterating from earliest to latest.
+     * I.e., earliestSessionEndTime is the lower bound of the search interval and latestSessionStartTime
+     * is the upper bound of the search interval, and the method returns all sessions that overlap
+     * with the search interval.
+     * Thus, if a session ends before earliestSessionEndTime, or starts after latestSessionStartTime
+     * it won't be contained in the result:
+     * <pre>{@code
+     * earliestSessionEndTime: ESET
+     * latestSessionStartTime: LSST
+     *
+     *                       [ESET............LSST]
+     * [not-included] [included]   [included]   [included] [not-included]
+     * }</pre>
      * <p>
      * This iterator must be closed after use.
      *
@@ -77,6 +101,18 @@ public interface ReadOnlySessionStore<K, AGG> {
     /**
      * Fetch any sessions with the matching key and the sessions end is &ge; earliestSessionEndTime
      * and the sessions start is &le; latestSessionStartTime iterating from latest to earliest.
+     * I.e., earliestSessionEndTime is the lower bound of the search interval and latestSessionStartTime
+     * is the upper bound of the search interval, and the method returns all sessions that overlap
+     * with the search interval.
+     * Thus, if a session ends before earliestSessionEndTime, or starts after latestSessionStartTime
+     * it won't be contained in the result:
+     * <pre>{@code
+     * earliestSessionEndTime: ESET
+     * latestSessionStartTime: LSST
+     *
+     *                       [ESET............LSST]
+     * [not-included] [included]   [included]   [included] [not-included]
+     * }</pre>
      * <p>
      * This iterator must be closed after use.
      *
@@ -99,6 +135,18 @@ public interface ReadOnlySessionStore<K, AGG> {
     /**
      * Fetch any sessions with the matching key and the sessions end is &ge; earliestSessionEndTime
      * and the sessions start is &le; latestSessionStartTime iterating from latest to earliest.
+     * I.e., earliestSessionEndTime is the lower bound of the search interval and latestSessionStartTime
+     * is the upper bound of the search interval, and the method returns all sessions that overlap
+     * with the search interval.
+     * Thus, if a session ends before earliestSessionEndTime, or starts after latestSessionStartTime
+     * it won't be contained in the result:
+     * <pre>{@code
+     * earliestSessionEndTime: ESET
+     * latestSessionStartTime: LSST
+     *
+     *                       [ESET............LSST]
+     * [not-included] [included]   [included]   [included] [not-included]
+     * }</pre>
      * <p>
      * This iterator must be closed after use.
      *
@@ -122,6 +170,18 @@ public interface ReadOnlySessionStore<K, AGG> {
      * Fetch any sessions in the given range of keys and the sessions end is &ge;
      * earliestSessionEndTime and the sessions start is &le; latestSessionStartTime iterating from
      * earliest to latest.
+     * I.e., earliestSessionEndTime is the lower bound of the search interval and latestSessionStartTime
+     * is the upper bound of the search interval, and the method returns all sessions that overlap
+     * with the search interval.
+     * Thus, if a session ends before earliestSessionEndTime, or starts after latestSessionStartTime
+     * it won't be contained in the result:
+     * <pre>{@code
+     * earliestSessionEndTime: ESET
+     * latestSessionStartTime: LSST
+     *
+     *                       [ESET............LSST]
+     * [not-included] [included]   [included]   [included] [not-included]
+     * }</pre>
      * <p>
      * This iterator must be closed after use.
      *
@@ -148,6 +208,18 @@ public interface ReadOnlySessionStore<K, AGG> {
      * Fetch any sessions in the given range of keys and the sessions end is &ge;
      * earliestSessionEndTime and the sessions start is &le; latestSessionStartTime iterating from
      * earliest to latest.
+     * I.e., earliestSessionEndTime is the lower bound of the search interval and latestSessionStartTime
+     * is the upper bound of the search interval, and the method returns all sessions that overlap
+     * with the search interval.
+     * Thus, if a session ends before earliestSessionEndTime, or starts after latestSessionStartTime
+     * it won't be contained in the result:
+     * <pre>{@code
+     * earliestSessionEndTime: ESET
+     * latestSessionStartTime: LSST
+     *
+     *                       [ESET............LSST]
+     * [not-included] [included]   [included]   [included] [not-included]
+     * }</pre>
      * <p>
      * This iterator must be closed after use.
      *
@@ -174,6 +246,18 @@ public interface ReadOnlySessionStore<K, AGG> {
      * Fetch any sessions in the given range of keys and the sessions end is &ge;
      * earliestSessionEndTime and the sessions start is &le; latestSessionStartTime iterating from
      * latest to earliest.
+     * I.e., earliestSessionEndTime is the lower bound of the search interval and latestSessionStartTime
+     * is the upper bound of the search interval, and the method returns all sessions that overlap
+     * with the search interval.
+     * Thus, if a session ends before earliestSessionEndTime, or starts after latestSessionStartTime
+     * it won't be contained in the result:
+     * <pre>{@code
+     * earliestSessionEndTime: ESET
+     * latestSessionStartTime: LSST
+     *
+     *                       [ESET............LSST]
+     * [not-included] [included]   [included]   [included] [not-included]
+     * }</pre>
      * <p>
      * This iterator must be closed after use.
      *
@@ -200,6 +284,18 @@ public interface ReadOnlySessionStore<K, AGG> {
      * Fetch any sessions in the given range of keys and the sessions end is &ge;
      * earliestSessionEndTime and the sessions start is &le; latestSessionStartTime iterating from
      * latest to earliest.
+     * I.e., earliestSessionEndTime is the lower bound of the search interval and latestSessionStartTime
+     * is the upper bound of the search interval, and the method returns all sessions that overlap
+     * with the search interval.
+     * Thus, if a session ends before earliestSessionEndTime, or starts after latestSessionStartTime
+     * it won't be contained in the result:
+     * <pre>{@code
+     * earliestSessionEndTime: ESET
+     * latestSessionStartTime: LSST
+     *
+     *                       [ESET............LSST]
+     * [not-included] [included]   [included]   [included] [not-included]
+     * }</pre>
      * <p>
      * This iterator must be closed after use.
      *
@@ -225,15 +321,16 @@ public interface ReadOnlySessionStore<K, AGG> {
     /**
      * Get the value of key from a single session.
      *
-     * @param key                    the key to fetch
-     * @param earliestSessionEndTime start timestamp of the session
-     * @param latestSessionStartTime end timestamp of the session
-     * @return The value or {@code null} if no session associated with the key can be found
+     * @param key              the key to fetch
+     * @param sessionStartTime start timestamp of the session
+     * @param sessionEndTime   end timestamp of the session
+     * @return The value or {@code null} if no session with the exact start and end timestamp exists
+     *         for the given key
      * @throws NullPointerException If {@code null} is used for any key.
      */
     default AGG fetchSession(final K key,
-                             final long earliestSessionEndTime,
-                             final long latestSessionStartTime) {
+                             final long sessionStartTime,
+                             final long sessionEndTime) {
         throw new UnsupportedOperationException(
             "This API is not supported by this implementation of ReadOnlySessionStore.");
     }
@@ -241,15 +338,16 @@ public interface ReadOnlySessionStore<K, AGG> {
     /**
      * Get the value of key from a single session.
      *
-     * @param key                    the key to fetch
-     * @param earliestSessionEndTime start timestamp of the session
-     * @param latestSessionStartTime end timestamp of the session
-     * @return The value or {@code null} if no session associated with the key can be found
+     * @param key              the key to fetch
+     * @param sessionStartTime start timestamp of the session
+     * @param sessionEndTime   end timestamp of the session
+     * @return The value or {@code null} if no session with the exact start and end timestamp exists
+     *         for the given key
      * @throws NullPointerException If {@code null} is used for any key.
      */
     default AGG fetchSession(final K key,
-                             final Instant earliestSessionEndTime,
-                             final Instant latestSessionStartTime) {
+                             final Instant sessionStartTime,
+                             final Instant sessionEndTime) {
         throw new UnsupportedOperationException(
             "This API is not supported by this implementation of ReadOnlySessionStore.");
     }

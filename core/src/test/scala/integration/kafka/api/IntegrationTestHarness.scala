@@ -18,18 +18,20 @@
 package kafka.api
 
 import java.time.Duration
-
-import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
+import org.apache.kafka.clients.consumer.{Consumer, ConsumerConfig, KafkaConsumer}
 import kafka.utils.TestUtils
 import kafka.utils.Implicits._
-import java.util.Properties
 
+import java.util.Properties
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig}
 import kafka.server.KafkaConfig
 import kafka.integration.KafkaServerTestHarness
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.common.network.{ListenerName, Mode}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer, Deserializer, Serializer}
+import org.apache.kafka.coordinator.group.GroupCoordinatorConfig
+import org.apache.kafka.network.SocketServerConfigs
+import org.apache.kafka.server.config.{KRaftConfigs, ReplicationConfigs}
 import org.junit.jupiter.api.{AfterEach, BeforeEach, TestInfo}
 
 import scala.collection.mutable
@@ -45,9 +47,11 @@ abstract class IntegrationTestHarness extends KafkaServerTestHarness {
   val producerConfig = new Properties
   val consumerConfig = new Properties
   val adminClientConfig = new Properties
+  val superuserClientConfig = new Properties
   val serverConfig = new Properties
+  val controllerConfig = new Properties
 
-  private val consumers = mutable.Buffer[KafkaConsumer[_, _]]()
+  private val consumers = mutable.Buffer[Consumer[_, _]]()
   private val producers = mutable.Buffer[KafkaProducer[_, _]]()
   private val adminClients = mutable.Buffer[Admin]()
 
@@ -58,26 +62,42 @@ abstract class IntegrationTestHarness extends KafkaServerTestHarness {
   }
 
   override def generateConfigs: Seq[KafkaConfig] = {
+
     val cfgs = TestUtils.createBrokerConfigs(brokerCount, zkConnectOrNull, interBrokerSecurityProtocol = Some(securityProtocol),
       trustStoreFile = trustStoreFile, saslProperties = serverSaslProperties, logDirCount = logDirCount)
     configureListeners(cfgs)
     modifyConfigs(cfgs)
+    if (isZkMigrationTest()) {
+      cfgs.foreach(_.setProperty(KRaftConfigs.MIGRATION_ENABLED_CONFIG, "true"))
+    }
+    if (isNewGroupCoordinatorEnabled()) {
+      cfgs.foreach(_.setProperty(GroupCoordinatorConfig.NEW_GROUP_COORDINATOR_ENABLE_CONFIG, "true"))
+    }
+
+    if(isKRaftTest()) {
+      cfgs.foreach(_.setProperty(KRaftConfigs.METADATA_LOG_DIR_CONFIG, TestUtils.tempDir().getAbsolutePath))
+    }
+
     insertControllerListenersIfNeeded(cfgs)
     cfgs.map(KafkaConfig.fromProps)
   }
 
+  override protected def kraftControllerConfigs(): Seq[Properties] = {
+    Seq(controllerConfig)
+  }
+
   protected def configureListeners(props: Seq[Properties]): Unit = {
     props.foreach { config =>
-      config.remove(KafkaConfig.InterBrokerSecurityProtocolProp)
-      config.setProperty(KafkaConfig.InterBrokerListenerNameProp, interBrokerListenerName.value)
+      config.remove(ReplicationConfigs.INTER_BROKER_SECURITY_PROTOCOL_CONFIG)
+      config.setProperty(ReplicationConfigs.INTER_BROKER_LISTENER_NAME_CONFIG, interBrokerListenerName.value)
 
       val listenerNames = Set(listenerName, interBrokerListenerName)
       val listeners = listenerNames.map(listenerName => s"${listenerName.value}://localhost:${TestUtils.RandomPort}").mkString(",")
       val listenerSecurityMap = listenerNames.map(listenerName => s"${listenerName.value}:${securityProtocol.name}").mkString(",")
 
-      config.setProperty(KafkaConfig.ListenersProp, listeners)
-      config.setProperty(KafkaConfig.AdvertisedListenersProp, listeners)
-      config.setProperty(KafkaConfig.ListenerSecurityProtocolMapProp, listenerSecurityMap)
+      config.setProperty(SocketServerConfigs.LISTENERS_CONFIG, listeners)
+      config.setProperty(SocketServerConfigs.ADVERTISED_LISTENERS_CONFIG, listeners)
+      config.setProperty(SocketServerConfigs.LISTENER_SECURITY_PROTOCOL_MAP_CONFIG, listenerSecurityMap)
     }
   }
 
@@ -85,13 +105,12 @@ abstract class IntegrationTestHarness extends KafkaServerTestHarness {
     if (isKRaftTest()) {
       props.foreach { config =>
         // Add a security protocol for the controller endpoints, if one is not already set.
-        val securityPairs = config.getProperty(KafkaConfig.ListenerSecurityProtocolMapProp, "").split(",")
-        val toAdd = config.getProperty(KafkaConfig.ControllerListenerNamesProp, "").split(",").filter{
-          case e => !securityPairs.exists(_.startsWith(s"${e}:"))
-        }
+        val securityPairs = config.getProperty(SocketServerConfigs.LISTENER_SECURITY_PROTOCOL_MAP_CONFIG, "").split(",")
+        val toAdd = config.getProperty(KRaftConfigs.CONTROLLER_LISTENER_NAMES_CONFIG, "").split(",").filter(
+          e => !securityPairs.exists(_.startsWith(s"$e:")))
         if (toAdd.nonEmpty) {
-          config.setProperty(KafkaConfig.ListenerSecurityProtocolMapProp, (securityPairs ++
-            toAdd.map(e => s"${e}:${controllerListenerSecurityProtocol.toString}")).mkString(","))
+          config.setProperty(SocketServerConfigs.LISTENER_SECURITY_PROTOCOL_MAP_CONFIG, (securityPairs ++
+            toAdd.map(e => s"$e:${controllerListenerSecurityProtocol.toString}")).mkString(","))
         }
       }
     }
@@ -102,40 +121,53 @@ abstract class IntegrationTestHarness extends KafkaServerTestHarness {
     doSetup(testInfo, createOffsetsTopic = true)
   }
 
+  /*
+   * The superuser by default is set up the same as the admin.
+   * Some tests need a separate principal for superuser operations.
+   * These tests may need to override the config before creating the offset topic.
+   */
+  protected def doSuperuserSetup(testInfo: TestInfo): Unit = {
+    superuserClientConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers())
+  }
+
   def doSetup(testInfo: TestInfo,
               createOffsetsTopic: Boolean): Unit = {
     // Generate client security properties before starting the brokers in case certs are needed
     producerConfig ++= clientSecurityProps("producer")
     consumerConfig ++= clientSecurityProps("consumer")
     adminClientConfig ++= clientSecurityProps("adminClient")
+    superuserClientConfig ++= superuserSecurityProps("superuserClient")
 
     super.setUp(testInfo)
 
-    producerConfig.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokerList)
+    producerConfig.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers())
     producerConfig.putIfAbsent(ProducerConfig.ACKS_CONFIG, "-1")
     producerConfig.putIfAbsent(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
     producerConfig.putIfAbsent(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[ByteArraySerializer].getName)
 
-    consumerConfig.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, brokerList)
+    consumerConfig.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers())
     consumerConfig.putIfAbsent(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
     consumerConfig.putIfAbsent(ConsumerConfig.GROUP_ID_CONFIG, "group")
     consumerConfig.putIfAbsent(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)
     consumerConfig.putIfAbsent(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, classOf[ByteArrayDeserializer].getName)
+    maybeGroupProtocolSpecified(testInfo).map(groupProtocol => consumerConfig.putIfAbsent(ConsumerConfig.GROUP_PROTOCOL_CONFIG, groupProtocol.name))
 
-    adminClientConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, brokerList)
+    adminClientConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers())
+
+    doSuperuserSetup(testInfo)
 
     if (createOffsetsTopic) {
-      if (isKRaftTest()) {
-        TestUtils.createOffsetsTopicWithAdmin(brokers, adminClientConfig)
-      } else {
-        TestUtils.createOffsetsTopic(zkClient, servers)
-      }
+      super.createOffsetsTopic(listenerName, superuserClientConfig)
     }
   }
 
   def clientSecurityProps(certAlias: String): Properties = {
     TestUtils.securityConfigs(Mode.CLIENT, securityProtocol, trustStoreFile, certAlias, TestUtils.SslCertificateCn,
       clientSaslProperties)
+  }
+
+  def superuserSecurityProps(certAlias: String): Properties = {
+    clientSecurityProps(certAlias)
   }
 
   def createProducer[K, V](keySerializer: Serializer[K] = new ByteArraySerializer,
@@ -152,7 +184,7 @@ abstract class IntegrationTestHarness extends KafkaServerTestHarness {
   def createConsumer[K, V](keyDeserializer: Deserializer[K] = new ByteArrayDeserializer,
                            valueDeserializer: Deserializer[V] = new ByteArrayDeserializer,
                            configOverrides: Properties = new Properties,
-                           configsToRemove: List[String] = List()): KafkaConsumer[K, V] = {
+                           configsToRemove: List[String] = List()): Consumer[K, V] = {
     val props = new Properties
     props ++= consumerConfig
     props ++= configOverrides
@@ -162,13 +194,28 @@ abstract class IntegrationTestHarness extends KafkaServerTestHarness {
     consumer
   }
 
-  def createAdminClient(configOverrides: Properties = new Properties): Admin = {
+  def createAdminClient(
+    listenerName: ListenerName = listenerName,
+    configOverrides: Properties = new Properties
+  ): Admin = {
     val props = new Properties
     props ++= adminClientConfig
     props ++= configOverrides
-    val adminClient = Admin.create(props)
-    adminClients += adminClient
-    adminClient
+    val admin = TestUtils.createAdminClient(brokers, listenerName, props)
+    adminClients += admin
+    admin
+  }
+
+  def createSuperuserAdminClient(
+    listenerName: ListenerName = listenerName,
+    configOverrides: Properties = new Properties
+  ): Admin = {
+    val props = new Properties
+    props ++= superuserClientConfig
+    props ++= configOverrides
+    val admin = TestUtils.createAdminClient(brokers, listenerName, props)
+    adminClients += admin
+    admin
   }
 
   @AfterEach

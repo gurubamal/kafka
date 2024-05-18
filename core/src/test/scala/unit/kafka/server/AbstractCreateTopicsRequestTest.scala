@@ -26,14 +26,15 @@ import org.apache.kafka.common.message.CreateTopicsRequestData
 import org.apache.kafka.common.message.CreateTopicsRequestData._
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests._
-import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotNull, assertTrue}
+import org.apache.kafka.server.config.ServerLogConfigs
+import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertNotEquals, assertNotNull, assertTrue}
 
 import scala.jdk.CollectionConverters._
 
 abstract class AbstractCreateTopicsRequestTest extends BaseRequestTest {
 
   override def brokerPropertyOverrides(properties: Properties): Unit =
-    properties.put(KafkaConfig.AutoCreateTopicsEnableProp, false.toString)
+    properties.put(ServerLogConfigs.AUTO_CREATE_TOPICS_ENABLE_CONFIG, false.toString)
 
   def topicsReq(topics: Seq[CreatableTopic],
                 timeout: Integer = 10000,
@@ -91,22 +92,14 @@ abstract class AbstractCreateTopicsRequestTest extends BaseRequestTest {
     topic
   }
 
-  def createTopicsSocketServer: SocketServer = {
-    if (isKRaftTest()) {
-      anySocketServer
-    } else {
-      controllerSocketServer
-    }
-  }
-
   protected def validateValidCreateTopicsRequests(request: CreateTopicsRequest): Unit = {
-    val response = sendCreateTopicRequest(request, createTopicsSocketServer)
+    val response = sendCreateTopicRequest(request, adminSocketServer)
 
     assertFalse(response.errorCounts().keySet().asScala.exists(_.code() > 0),
       s"There should be no errors, found ${response.errorCounts().keySet().asScala.mkString(", ")},")
 
     request.data.topics.forEach { topic =>
-      def verifyMetadata(socketServer: SocketServer) = {
+      def verifyMetadata(socketServer: SocketServer): Unit = {
         val metadata = sendMetadataRequest(
           new MetadataRequest.Builder(List(topic.name()).asJava, false).build(), socketServer).topicMetadata.asScala
         val metadataForTopic = metadata.filter(_.topic == topic.name()).head
@@ -122,8 +115,8 @@ abstract class AbstractCreateTopicsRequestTest extends BaseRequestTest {
           topic.replicationFactor
 
         if (request.data.validateOnly) {
-          assertNotNull(metadataForTopic, s"Topic $topic should be created")
-          assertFalse(metadataForTopic.error == Errors.NONE, s"Error ${metadataForTopic.error} for topic $topic")
+          assertNotNull(metadataForTopic)
+          assertNotEquals(Errors.NONE, metadataForTopic.error, s"Topic $topic should not be created")
           assertTrue(metadataForTopic.partitionMetadata.isEmpty, "The topic should have no partitions")
         }
         else {
@@ -162,7 +155,7 @@ abstract class AbstractCreateTopicsRequestTest extends BaseRequestTest {
   protected def validateErrorCreateTopicsRequests(request: CreateTopicsRequest,
                                                   expectedResponse: Map[String, ApiError],
                                                   checkErrorMessage: Boolean = true): Unit = {
-    val response = sendCreateTopicRequest(request, createTopicsSocketServer)
+    val response = sendCreateTopicRequest(request, adminSocketServer)
     assertEquals(expectedResponse.size, response.data().topics().size, "The response size should match")
 
     expectedResponse.foreach { case (topicName, expectedError) =>
@@ -171,9 +164,9 @@ abstract class AbstractCreateTopicsRequestTest extends BaseRequestTest {
       if (actual == null) {
         throw new RuntimeException(s"No response data found for topic $topicName")
       }
-      assertEquals(expected.error.code(), actual.errorCode(), "The response error should match")
+      assertEquals(expected.error.code(), actual.errorCode(), "The response error code should match")
       if (checkErrorMessage) {
-        assertEquals(expected.message, actual.errorMessage())
+        assertEquals(expected.message, actual.errorMessage(), "The response error message should match")
       }
       // If no error validate topic exists
       if (expectedError.isSuccess && !request.data.validateOnly) {

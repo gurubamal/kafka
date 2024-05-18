@@ -23,6 +23,7 @@ import kafka.integration.KafkaServerTestHarness
 import kafka.server.KafkaConfig
 import kafka.utils.TestUtils
 import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.server.config.{ReplicationConfigs, ServerLogConfigs}
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.Test
 import scala.collection.Map
@@ -32,8 +33,8 @@ class RackAwareAutoTopicCreationTest extends KafkaServerTestHarness with RackAwa
   val numPartitions = 8
   val replicationFactor = 2
   val overridingProps = new Properties()
-  overridingProps.put(KafkaConfig.NumPartitionsProp, numPartitions.toString)
-  overridingProps.put(KafkaConfig.DefaultReplicationFactorProp, replicationFactor.toString)
+  overridingProps.put(ServerLogConfigs.NUM_PARTITIONS_CONFIG, numPartitions.toString)
+  overridingProps.put(ReplicationConfigs.DEFAULT_REPLICATION_FACTOR_CONFIG, replicationFactor.toString)
 
   def generateConfigs =
     (0 until numServers) map { node =>
@@ -44,7 +45,7 @@ class RackAwareAutoTopicCreationTest extends KafkaServerTestHarness with RackAwa
 
   @Test
   def testAutoCreateTopic(): Unit = {
-    val producer = TestUtils.createProducer(brokerList)
+    val producer = TestUtils.createProducer(bootstrapServers())
     try {
       // Send a message to auto-create the topic
       val record = new ProducerRecord(topic, null, "key".getBytes, "value".getBytes)

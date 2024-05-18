@@ -21,7 +21,7 @@ import static java.util.Collections.emptySet;
 import static java.util.Collections.singleton;
 import static java.util.Collections.singletonList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -59,7 +59,7 @@ public class DeleteConsumerGroupOffsetsHandlerTest {
     @Test
     public void testBuildRequest() {
         DeleteConsumerGroupOffsetsHandler handler = new DeleteConsumerGroupOffsetsHandler(groupId, tps, logContext);
-        OffsetDeleteRequest request = handler.buildRequest(1, singleton(CoordinatorKey.byGroupId(groupId))).build();
+        OffsetDeleteRequest request = handler.buildBatchedRequest(1, singleton(CoordinatorKey.byGroupId(groupId))).build();
         assertEquals(groupId, request.data().groupId());
         assertEquals(2, request.data().topics().size());
         assertEquals(2, request.data().topics().find("t0").partitions().size());
@@ -122,7 +122,7 @@ public class DeleteConsumerGroupOffsetsHandlerTest {
     }
 
     private OffsetDeleteResponse buildPartitionErrorResponse(Errors error) {
-        OffsetDeleteResponse response = new OffsetDeleteResponse(
+        return new OffsetDeleteResponse(
             new OffsetDeleteResponseData()
                 .setThrottleTimeMs(0)
                 .setTopics(new OffsetDeleteResponseTopicCollection(singletonList(
@@ -135,7 +135,6 @@ public class DeleteConsumerGroupOffsetsHandlerTest {
                         ).iterator()))
                 ).iterator()))
         );
-        return response;
     }
 
     private AdminApiHandler.ApiResult<CoordinatorKey, Map<TopicPartition, Errors>> handleWithGroupError(
@@ -189,7 +188,7 @@ public class DeleteConsumerGroupOffsetsHandlerTest {
         assertEquals(emptySet(), result.completedKeys.keySet());
         assertEquals(emptyList(), result.unmappedKeys);
         assertEquals(singleton(key), result.failedKeys.keySet());
-        assertTrue(expectedExceptionType.isInstance(result.failedKeys.get(key)));
+        assertInstanceOf(expectedExceptionType, result.failedKeys.get(key));
     }
 
     private void assertPartitionFailed(

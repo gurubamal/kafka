@@ -17,11 +17,11 @@
 package kafka.server
 
 import java.util.concurrent.atomic.AtomicReference
-
 import kafka.metrics.KafkaMetricsReporter
 import kafka.utils.{CoreUtils, TestUtils, VerifiableProperties}
 import kafka.server.QuorumTestHarness
 import org.apache.kafka.common.{ClusterResource, ClusterResourceListener}
+import org.apache.kafka.server.metrics.MetricConfigs
 import org.apache.kafka.test.MockMetricsReporter
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.{AfterEach, BeforeEach, Test, TestInfo}
@@ -76,15 +76,15 @@ object KafkaMetricReporterClusterIdTest {
 }
 
 class KafkaMetricReporterClusterIdTest extends QuorumTestHarness {
-  var server: KafkaServer = null
-  var config: KafkaConfig = null
+  var server: KafkaServer = _
+  var config: KafkaConfig = _
 
   @BeforeEach
   override def setUp(testInfo: TestInfo): Unit = {
     super.setUp(testInfo)
     val props = TestUtils.createBrokerConfig(1, zkConnect)
-    props.setProperty(KafkaConfig.KafkaMetricsReporterClassesProp, "kafka.server.KafkaMetricReporterClusterIdTest$MockKafkaMetricsReporter")
-    props.setProperty(KafkaConfig.MetricReporterClassesProp, "kafka.server.KafkaMetricReporterClusterIdTest$MockBrokerMetricsReporter")
+    props.setProperty(MetricConfigs.KAFKA_METRICS_REPORTER_CLASSES_CONFIG, "kafka.server.KafkaMetricReporterClusterIdTest$MockKafkaMetricsReporter")
+    props.setProperty(MetricConfigs.METRIC_REPORTER_CLASSES_CONFIG, "kafka.server.KafkaMetricReporterClusterIdTest$MockBrokerMetricsReporter")
     props.setProperty(KafkaConfig.BrokerIdGenerationEnableProp, "true")
     props.setProperty(KafkaConfig.BrokerIdProp, "-1")
     config = KafkaConfig.fromProps(props)

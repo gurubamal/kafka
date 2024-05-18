@@ -38,9 +38,9 @@ import static java.util.Collections.singleton;
 import static java.util.Collections.singletonList;
 import static org.apache.kafka.common.utils.Utils.mkSet;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class AbortTransactionHandlerTest {
     private final LogContext logContext = new LogContext();
@@ -63,7 +63,7 @@ public class AbortTransactionHandlerTest {
     @Test
     public void testValidBuildRequestCall() {
         AbortTransactionHandler handler = new AbortTransactionHandler(abortSpec, logContext);
-        WriteTxnMarkersRequest.Builder request = handler.buildRequest(1, singleton(topicPartition));
+        WriteTxnMarkersRequest.Builder request = handler.buildBatchedRequest(1, singleton(topicPartition));
         assertEquals(1, request.data.markers().size());
 
         WriteTxnMarkersRequestData.WritableTxnMarker markerRequest = request.data.markers().get(0);
@@ -214,7 +214,7 @@ public class AbortTransactionHandlerTest {
         assertEquals(emptySet(), result.completedKeys.keySet());
         assertEquals(emptyList(), result.unmappedKeys);
         assertEquals(singleton(topicPartition), result.failedKeys.keySet());
-        assertTrue(expectedExceptionType.isInstance(result.failedKeys.get(topicPartition)));
+        assertInstanceOf(expectedExceptionType, result.failedKeys.get(topicPartition));
     }
 
 }

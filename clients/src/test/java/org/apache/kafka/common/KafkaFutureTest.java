@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -122,6 +123,14 @@ public class KafkaFutureTest {
         assertEquals(CancellationException.class, cancellationException.getClass());
     }
 
+    private Object invokeOrThrow(final Method method, final Object obj, final Object... args) throws Throwable {
+        try {
+            return method.invoke(obj, args);
+        } catch (InvocationTargetException e) {
+            throw e.getCause();
+        }
+    }
+
     @Test
     public void testCompleteFutures() throws Exception {
         KafkaFutureImpl<Integer> future123 = new KafkaFutureImpl<>();
@@ -139,7 +148,7 @@ public class KafkaFutureTest {
     }
 
     @Test
-    public void testCompleteFuturesExceptionally() throws Exception {
+    public void testCompleteFuturesExceptionally() {
         KafkaFutureImpl<Integer> futureFail = new KafkaFutureImpl<>();
         assertTrue(futureFail.completeExceptionally(new RuntimeException("We require more vespene gas")));
         assertIsFailed(futureFail);
@@ -308,7 +317,7 @@ public class KafkaFutureTest {
         assertIsFailed(dependantFuture);
         awaitAndAssertResult(future, 21, null);
         Throwable cause = awaitAndAssertFailure(dependantFuture, CompletionException.class, "java.lang.RuntimeException: We require more vespene gas");
-        assertTrue(cause.getCause() instanceof RuntimeException);
+        assertInstanceOf(RuntimeException.class, cause.getCause());
         assertEquals(cause.getCause().getMessage(), "We require more vespene gas");
     }
 
@@ -430,7 +439,7 @@ public class KafkaFutureTest {
         assertFalse(dependantFuture.isDone());
         assertTrue(future.cancel(true));
         assertTrue(ran[0]);
-        assertTrue(err[0] instanceof CancellationException);
+        assertInstanceOf(CancellationException.class, err[0]);
     }
 
     private static class CompleterThread<T> extends Thread {
@@ -591,7 +600,7 @@ public class KafkaFutureTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    public void testLeakCompletableFuture() throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
+    public void testLeakCompletableFuture() throws Throwable {
         final KafkaFutureImpl<String> kfut = new KafkaFutureImpl<>();
         CompletableFuture<String> comfut = kfut.toCompletionStage().toCompletableFuture();
         assertThrows(UnsupportedOperationException.class, () -> comfut.complete(""));
@@ -600,44 +609,20 @@ public class KafkaFutureTest {
         // so test reflectively
         if (Java.IS_JAVA9_COMPATIBLE) {
             Method completeOnTimeout = CompletableFuture.class.getDeclaredMethod("completeOnTimeout", Object.class, Long.TYPE, TimeUnit.class);
-            assertThrows(UnsupportedOperationException.class, () -> {
-                try {
-                    completeOnTimeout.invoke(comfut, "", 1L, TimeUnit.MILLISECONDS);
-                } catch (InvocationTargetException e) {
-                    throw e.getCause();
-                }
-            });
+            assertThrows(UnsupportedOperationException.class, () -> invokeOrThrow(completeOnTimeout, comfut, "", 1L, TimeUnit.MILLISECONDS));
 
             Method completeAsync = CompletableFuture.class.getDeclaredMethod("completeAsync", Supplier.class);
-            assertThrows(UnsupportedOperationException.class, () -> {
-                try {
-                    completeAsync.invoke(comfut, (Supplier<String>) () -> "");
-                } catch (InvocationTargetException e) {
-                    throw e.getCause();
-                }
-            });
+            assertThrows(UnsupportedOperationException.class, () -> invokeOrThrow(completeAsync, comfut, (Supplier<String>) () -> ""));
 
             Method obtrudeValue = CompletableFuture.class.getDeclaredMethod("obtrudeValue", Object.class);
-            assertThrows(UnsupportedOperationException.class, () -> {
-                try {
-                    obtrudeValue.invoke(comfut, "");
-                } catch (InvocationTargetException e) {
-                    throw e.getCause();
-                }
-            });
+            assertThrows(UnsupportedOperationException.class, () -> invokeOrThrow(obtrudeValue, comfut, ""));
 
             Method obtrudeException = CompletableFuture.class.getDeclaredMethod("obtrudeException", Throwable.class);
-            assertThrows(UnsupportedOperationException.class, () -> {
-                try {
-                    obtrudeException.invoke(comfut, new RuntimeException());
-                } catch (InvocationTargetException e) {
-                    throw e.getCause();
-                }
-            });
+            assertThrows(UnsupportedOperationException.class, () -> invokeOrThrow(obtrudeException, comfut, new RuntimeException()));
 
             // Check the CF from a minimal CompletionStage doesn't cause completion of the original KafkaFuture
             Method minimal = CompletableFuture.class.getDeclaredMethod("minimalCompletionStage");
-            CompletionStage<String> cs = (CompletionStage<String>) minimal.invoke(comfut);
+            CompletionStage<String> cs = (CompletionStage<String>) invokeOrThrow(minimal, comfut);
             cs.toCompletableFuture().complete("");
 
             assertFalse(kfut.isDone());

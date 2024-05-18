@@ -53,16 +53,15 @@ import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.apache.kafka.streams.state.internals.StoreQueryUtils;
-import org.apache.kafka.test.IntegrationTest;
 import org.apache.kafka.test.TestUtils;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.experimental.categories.Category;
-import org.junit.rules.TestName;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -87,9 +86,9 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-@Category({IntegrationTest.class})
+@Timeout(600)
+@Tag("integration")
 public class IQv2IntegrationTest {
-
     private static final int NUM_BROKERS = 1;
     public static final Duration WINDOW_SIZE = Duration.ofMinutes(5);
     private static int port = 0;
@@ -101,10 +100,7 @@ public class IQv2IntegrationTest {
 
     private KafkaStreams kafkaStreams;
 
-    @Rule
-    public TestName testName = new TestName();
-
-    @BeforeClass
+    @BeforeAll
     public static void before()
         throws InterruptedException, IOException, ExecutionException, TimeoutException {
         CLUSTER.start();
@@ -153,8 +149,8 @@ public class IQv2IntegrationTest {
         ));
     }
 
-    @Before
-    public void beforeTest() {
+    @BeforeEach
+    public void beforeTest(final TestInfo testInfo) {
         final StreamsBuilder builder = new StreamsBuilder();
 
         builder.table(
@@ -163,17 +159,19 @@ public class IQv2IntegrationTest {
             Materialized.as(STORE_NAME)
         );
 
-        kafkaStreams = new KafkaStreams(builder.build(), streamsConfiguration());
+
+        final String safeTestName = IntegrationTestUtils.safeUniqueTestName(testInfo);
+        kafkaStreams = new KafkaStreams(builder.build(), streamsConfiguration(safeTestName));
         kafkaStreams.cleanUp();
     }
 
-    @After
+    @AfterEach
     public void afterTest() {
         kafkaStreams.close();
         kafkaStreams.cleanUp();
     }
 
-    @AfterClass
+    @AfterAll
     public static void after() {
         CLUSTER.stop();
     }
@@ -293,7 +291,7 @@ public class IQv2IntegrationTest {
     }
 
     @Test
-    public void shouldNotRequireQueryHandler() {
+    public void shouldNotRequireQueryHandler(final TestInfo testInfo) {
         final KeyQuery<Integer, ValueAndTimestamp<Integer>> query = KeyQuery.withKey(1);
         final int partition = 1;
         final Set<Integer> partitions = singleton(partition);
@@ -321,28 +319,36 @@ public class IQv2IntegrationTest {
 
                         @Override
                         public void put(final Bytes key, final byte[] value) {
-                            map.put(key, value);
-                            StoreQueryUtils.updatePosition(position,  context);
+                            synchronized (position) {
+                                map.put(key, value);
+                                StoreQueryUtils.updatePosition(position, context);
+                            }
                         }
 
                         @Override
                         public byte[] putIfAbsent(final Bytes key, final byte[] value) {
-                            StoreQueryUtils.updatePosition(position,  context);
-                            return map.putIfAbsent(key, value);
+                            synchronized (position) {
+                                StoreQueryUtils.updatePosition(position, context);
+                                return map.putIfAbsent(key, value);
+                            }
                         }
 
                         @Override
                         public void putAll(final List<KeyValue<Bytes, byte[]>> entries) {
-                            StoreQueryUtils.updatePosition(position,  context);
-                            for (final KeyValue<Bytes, byte[]> entry : entries) {
-                                map.put(entry.key, entry.value);
+                            synchronized (position) {
+                                StoreQueryUtils.updatePosition(position, context);
+                                for (final KeyValue<Bytes, byte[]> entry : entries) {
+                                    map.put(entry.key, entry.value);
+                                }
                             }
                         }
 
                         @Override
                         public byte[] delete(final Bytes key) {
-                            StoreQueryUtils.updatePosition(position,  context);
-                            return map.remove(key);
+                            synchronized (position) {
+                                StoreQueryUtils.updatePosition(position, context);
+                                return map.remove(key);
+                            }
                         }
 
                         @Override
@@ -422,7 +428,10 @@ public class IQv2IntegrationTest {
             })
         );
 
-        kafkaStreams = new KafkaStreams(builder.build(), streamsConfiguration());
+        // Discard the basic streams and replace with test-specific topology
+        kafkaStreams.close();
+        final String safeTestName = IntegrationTestUtils.safeUniqueTestName(testInfo);
+        kafkaStreams = new KafkaStreams(builder.build(), streamsConfiguration(safeTestName));
         kafkaStreams.cleanUp();
 
         kafkaStreams.start();
@@ -440,9 +449,7 @@ public class IQv2IntegrationTest {
     }
 
 
-    private Properties streamsConfiguration() {
-        final String safeTestName = IntegrationTestUtils.safeUniqueTestName(getClass(), testName);
-
+    private Properties streamsConfiguration(final String safeTestName) {
         final Properties config = new Properties();
         config.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
         config.put(StreamsConfig.APPLICATION_ID_CONFIG, "app-" + safeTestName);

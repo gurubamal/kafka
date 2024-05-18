@@ -41,25 +41,25 @@ class StopReplicaRequestTest extends BaseRequestTest {
 
   @Test
   def testStopReplicaRequest(): Unit = {
-    createTopic(topic, partitionNum, 1)
+    createTopic(topic, partitionNum)
     TestUtils.generateAndProduceMessages(servers, topic, 10)
 
     val server = servers.head
     val offlineDir = server.logManager.getLog(tp1).get.dir.getParent
-    server.replicaManager.handleLogDirFailure(offlineDir, sendZkNotification = false)
+    server.replicaManager.handleLogDirFailure(offlineDir, notifyController = false)
 
     val topicStates = Seq(
       new StopReplicaTopicState()
         .setTopicName(tp0.topic())
         .setPartitionStates(Seq(new StopReplicaPartitionState()
           .setPartitionIndex(tp0.partition())
-          .setLeaderEpoch(LeaderAndIsr.initialLeaderEpoch + 2)
+          .setLeaderEpoch(LeaderAndIsr.InitialLeaderEpoch + 2)
           .setDeletePartition(true)).asJava),
       new StopReplicaTopicState()
         .setTopicName(tp1.topic())
         .setPartitionStates(Seq(new StopReplicaPartitionState()
           .setPartitionIndex(tp1.partition())
-          .setLeaderEpoch(LeaderAndIsr.initialLeaderEpoch + 2)
+          .setLeaderEpoch(LeaderAndIsr.InitialLeaderEpoch + 2)
           .setDeletePartition(true)).asJava)
     ).asJava
 

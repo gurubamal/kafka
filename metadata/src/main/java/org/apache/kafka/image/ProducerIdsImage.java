@@ -18,12 +18,11 @@
 package org.apache.kafka.image;
 
 import org.apache.kafka.common.metadata.ProducerIdsRecord;
-import org.apache.kafka.server.common.ApiMessageAndVersion;
+import org.apache.kafka.image.node.ProducerIdsImageNode;
+import org.apache.kafka.image.writer.ImageWriter;
+import org.apache.kafka.image.writer.ImageWriterOptions;
 
-import java.util.Collections;
-import java.util.List;
 import java.util.Objects;
-import java.util.function.Consumer;
 
 
 /**
@@ -34,44 +33,46 @@ import java.util.function.Consumer;
 public final class ProducerIdsImage {
     public final static ProducerIdsImage EMPTY = new ProducerIdsImage(-1L);
 
-    private final long highestSeenProducerId;
+    /**
+     * The next producer ID, or -1 in the special case where no producer IDs have been issued.
+     */
+    private final long nextProducerId;
 
-    public ProducerIdsImage(long highestSeenProducerId) {
-        this.highestSeenProducerId = highestSeenProducerId;
+    public ProducerIdsImage(long nextProducerId) {
+        this.nextProducerId = nextProducerId;
     }
 
-    public long highestSeenProducerId() {
-        return highestSeenProducerId;
+    public long nextProducerId() {
+        return nextProducerId;
     }
 
-    public void write(Consumer<List<ApiMessageAndVersion>> out) {
-        if (highestSeenProducerId >= 0) {
-            out.accept(Collections.singletonList(new ApiMessageAndVersion(
-                new ProducerIdsRecord().
+    public void write(ImageWriter writer, ImageWriterOptions options) {
+        if (nextProducerId >= 0) {
+            writer.write(0, new ProducerIdsRecord().
                     setBrokerId(-1).
                     setBrokerEpoch(-1).
-                    setProducerIdsEnd(highestSeenProducerId), (short) 0)));
+                    setNextProducerId(nextProducerId));
         }
+    }
+
+    public boolean isEmpty() {
+        return nextProducerId == EMPTY.nextProducerId;
     }
 
     @Override
     public boolean equals(Object o) {
         if (!(o instanceof ProducerIdsImage)) return false;
         ProducerIdsImage other = (ProducerIdsImage) o;
-        return highestSeenProducerId == other.highestSeenProducerId;
+        return nextProducerId == other.nextProducerId;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(highestSeenProducerId);
+        return Objects.hash(nextProducerId);
     }
 
     @Override
     public String toString() {
-        return "ProducerIdsImage(highestSeenProducerId=" + highestSeenProducerId + ")";
-    }
-
-    public boolean isEmpty() {
-        return highestSeenProducerId < 0;
+        return new ProducerIdsImageNode(this).stringify();
     }
 }

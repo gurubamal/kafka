@@ -48,7 +48,7 @@ import java.util.regex.Pattern;
  * Utility for converting from one Connect value to a different form. This is useful when the caller expects a value of a particular type
  * but is uncertain whether the actual value is one that isn't directly that type but can be converted into that type.
  *
- * <p>For example, a caller might expects a particular {@link org.apache.kafka.connect.header.Header} to contain an {@link Type#INT64}
+ * <p>For example, a caller might expect a particular {@link org.apache.kafka.connect.header.Header} to contain a {@link Type#INT64}
  * value, when in fact that header contains a string representation of a 32-bit integer. Here, the caller can use the methods in this
  * class to convert the value to the desired type:
  * <pre>
@@ -100,10 +100,10 @@ public class Values {
 
     private static final Pattern TWO_BACKSLASHES = Pattern.compile("\\\\");
 
-    private static final Pattern DOUBLEQOUTE = Pattern.compile("\"");
+    private static final Pattern DOUBLE_QUOTE = Pattern.compile("\"");
 
     /**
-     * Convert the specified value to an {@link Type#BOOLEAN} value. The supplied schema is required if the value is a logical
+     * Convert the specified value to a {@link Type#BOOLEAN} value. The supplied schema is required if the value is a logical
      * type when the schema contains critical information that might be necessary for converting to a boolean.
      *
      * @param schema the schema for the value; may be null
@@ -168,7 +168,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Type#FLOAT32} float value. The supplied schema is required if the value is a logical
+     * Convert the specified value to a {@link Type#FLOAT32} float value. The supplied schema is required if the value is a logical
      * type when the schema contains critical information that might be necessary for converting to a floating point number.
      *
      * @param schema the schema for the value; may be null
@@ -181,7 +181,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Type#FLOAT64} double value. The supplied schema is required if the value is a logical
+     * Convert the specified value to a {@link Type#FLOAT64} double value. The supplied schema is required if the value is a logical
      * type when the schema contains critical information that might be necessary for converting to a floating point number.
      *
      * @param schema the schema for the value; may be null
@@ -194,7 +194,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Type#STRING} value.
+     * Convert the specified value to a {@link Type#STRING} value.
      * Not supplying a schema may limit the ability to convert to the desired type.
      *
      * @param schema the schema for the value; may be null
@@ -223,7 +223,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Type#MAP} value. If the value is a string representation of a map, this method
+     * Convert the specified value to a {@link Type#MAP} value. If the value is a string representation of a map, this method
      * will parse the string and its entries to infer the schemas for those entries. Thus, this method supports
      * maps with primitives and structured keys and values. If the value is already a map, this method simply casts and returns it.
      *
@@ -239,7 +239,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Type#STRUCT} value. Structs cannot be converted from other types, so this method returns
+     * Convert the specified value to a {@link Type#STRUCT} value. Structs cannot be converted from other types, so this method returns
      * a struct only if the supplied value is a struct. If not a struct, this method throws an exception.
      *
      * <p>This method currently does not use the schema, though it may be used in the future.</p>
@@ -254,7 +254,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Time#SCHEMA time} value.
+     * Convert the specified value to a {@link Time#SCHEMA time} value.
      * Not supplying a schema may limit the ability to convert to the desired type.
      *
      * @param schema the schema for the value; may be null
@@ -267,7 +267,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Date#SCHEMA date} value.
+     * Convert the specified value to a {@link Date#SCHEMA date} value.
      * Not supplying a schema may limit the ability to convert to the desired type.
      *
      * @param schema the schema for the value; may be null
@@ -280,7 +280,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Timestamp#SCHEMA timestamp} value.
+     * Convert the specified value to a {@link Timestamp#SCHEMA timestamp} value.
      * Not supplying a schema may limit the ability to convert to the desired type.
      *
      * @param schema the schema for the value; may be null
@@ -293,7 +293,7 @@ public class Values {
     }
 
     /**
-     * Convert the specified value to an {@link Decimal decimal} value.
+     * Convert the specified value to a {@link Decimal decimal} value.
      * Not supplying a schema may limit the ability to convert to the desired type.
      *
      * @param schema the schema for the value; may be null
@@ -424,7 +424,7 @@ public class Values {
                         return BigDecimal.valueOf(converted);
                     }
                     if (value instanceof String) {
-                        return new BigDecimal(value.toString()).doubleValue();
+                        return new BigDecimal(value.toString());
                     }
                 }
                 if (value instanceof ByteBuffer) {
@@ -584,8 +584,7 @@ public class Values {
                 break;
             case STRUCT:
                 if (value instanceof Struct) {
-                    Struct struct = (Struct) value;
-                    return struct;
+                    return value;
                 }
         }
         throw new DataException("Unable to convert " + value + " (" + value.getClass() + ") to " + toSchema);
@@ -732,7 +731,7 @@ public class Values {
 
     protected static String escape(String value) {
         String replace1 = TWO_BACKSLASHES.matcher(value).replaceAll("\\\\\\\\");
-        return DOUBLEQOUTE.matcher(replace1).replaceAll("\\\\\"");
+        return DOUBLE_QUOTE.matcher(replace1).replaceAll("\\\\\"");
     }
 
     public static DateFormat dateFormatFor(java.util.Date value) {
@@ -803,11 +802,12 @@ public class Values {
         try {
             if (parser.canConsume(ARRAY_BEGIN_DELIMITER)) {
                 List<Object> result = new ArrayList<>();
+                boolean compatible = true;
                 Schema elementSchema = null;
                 while (parser.hasNext()) {
                     if (parser.canConsume(ARRAY_END_DELIMITER)) {
                         Schema listSchema;
-                        if (elementSchema != null) {
+                        if (elementSchema != null && compatible) {
                             listSchema = SchemaBuilder.array(elementSchema).schema();
                             result = alignListEntriesWithSchema(listSchema, result);
                         } else {
@@ -822,6 +822,9 @@ public class Values {
                     }
                     SchemaAndValue element = parse(parser, true);
                     elementSchema = commonSchemaFor(elementSchema, element);
+                    if (elementSchema == null && element != null && element.schema() != null) {
+                        compatible = false;
+                    }
                     result.add(element != null ? element.value() : null);
 
                     int currentPosition = parser.mark();
@@ -841,15 +844,17 @@ public class Values {
 
             if (parser.canConsume(MAP_BEGIN_DELIMITER)) {
                 Map<Object, Object> result = new LinkedHashMap<>();
+                boolean keyCompatible = true;
                 Schema keySchema = null;
+                boolean valueCompatible = true;
                 Schema valueSchema = null;
                 while (parser.hasNext()) {
                     if (parser.canConsume(MAP_END_DELIMITER)) {
                         Schema mapSchema;
-                        if (keySchema != null && valueSchema != null) {
+                        if (keySchema != null && valueSchema != null && keyCompatible && valueCompatible) {
                             mapSchema = SchemaBuilder.map(keySchema, valueSchema).build();
                             result = alignMapKeysAndValuesWithSchema(mapSchema, result);
-                        } else if (keySchema != null) {
+                        } else if (keySchema != null && keyCompatible) {
                             mapSchema = SchemaBuilder.mapWithNullValues(keySchema);
                             result = alignMapKeysWithSchema(mapSchema, result);
                         } else {
@@ -877,7 +882,13 @@ public class Values {
 
                     parser.canConsume(COMMA_DELIMITER);
                     keySchema = commonSchemaFor(keySchema, key);
+                    if (keySchema == null && key.schema() != null) {
+                        keyCompatible = false;
+                    }
                     valueSchema = commonSchemaFor(valueSchema, value);
+                    if (valueSchema == null && value != null && value.schema() != null) {
+                        valueCompatible = false;
+                    }
                 }
                 // Missing either a comma or an end delimiter
                 if (COMMA_DELIMITER.equals(parser.previous())) {

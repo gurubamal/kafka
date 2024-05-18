@@ -18,8 +18,6 @@ package org.apache.kafka.connect.util.clusters;
 
 import org.apache.kafka.connect.cli.ConnectDistributed;
 import org.apache.kafka.connect.runtime.Connect;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.net.URI;
 import java.util.Map;
@@ -29,7 +27,6 @@ import java.util.Objects;
  * A handle to a worker executing in a Connect cluster.
  */
 public class WorkerHandle {
-    private static final Logger log = LoggerFactory.getLogger(WorkerHandle.class);
 
     private final String workerName;
     private final Connect worker;
@@ -81,7 +78,7 @@ public class WorkerHandle {
      * @return the worker's url
      */
     public URI url() {
-        return worker.restUrl();
+        return worker.rest().serverUrl();
     }
 
     /**
@@ -90,14 +87,24 @@ public class WorkerHandle {
      * @return the worker's admin url
      */
     public URI adminUrl() {
-        return worker.adminUrl();
+        return worker.rest().adminUrl();
+    }
+
+    /**
+     * Set a new timeout for REST requests to the worker. Useful if a request is expected
+     * to block, since the time spent awaiting that request can be reduced and test runtime
+     * bloat can be avoided.
+     * @param requestTimeoutMs the new timeout in milliseconds; must be positive
+     */
+    public void requestTimeout(long requestTimeoutMs) {
+        worker.rest().requestTimeout(requestTimeoutMs);
     }
 
     @Override
     public String toString() {
         return "WorkerHandle{" +
                 "workerName='" + workerName + '\'' +
-                "workerURL='" + worker.restUrl() + '\'' +
+                "workerURL='" + worker.rest().serverUrl() + '\'' +
                 '}';
     }
 
